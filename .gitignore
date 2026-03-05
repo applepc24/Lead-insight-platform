@@ -1,0 +1,16 @@
+# secrets
+.env
+
+# local python
+.venv/
+__pycache__/
+*.pyc
+
+# local data outputs
+raw/
+.cursor_*.json
+
+# OS/IDE
+.DS_Store
+.vscode/
+.idea/
