@@ -1,12 +1,24 @@
-# secrets
+# env
 .env
+.env.*
 
-# local python
+# python
 .venv/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 
-# local data outputs
+# airflow runtime
+airflow/logs/
+airflow/plugins/__pycache__/
+airflow/dags/__pycache__/
+
+# secrets (keep folder, ignore contents)
+airflow/secrets/*
+!airflow/secrets/.gitkeep
+
+# local outputs
 raw/
 .cursor_*.json
 
