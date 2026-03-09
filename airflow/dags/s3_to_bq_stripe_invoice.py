@@ -7,8 +7,7 @@ from typing import List
 
 import boto3
 from airflow import DAG
-from airflow.operators.python import PythonOperator
-from airflow.providers.google.cloud.operators.bigquery import BigQueryInsertJobOperator
+from airflow.operators.python import PythonOperator # type: ignore
 from google.cloud import bigquery
 
 
@@ -185,55 +184,6 @@ def load_s3_to_bq(**context):
     append_rows_to_bq(project_id, dataset, target_table, bq_rows)
     print(f"[dag] loaded files={len(new_keys)}, rows={len(bq_rows)}")
 
-MERGE_SQL = """
-MERGE `{{ params.project_id }}.{{ params.dataset }}.mart_lead_summary` T
-USING (
-  WITH base AS (
-    SELECT
-      customer_key,
-      occurred_at,
-      amount
-    FROM `{{ params.project_id }}.{{ params.dataset }}.v_stripe_invoice_events_dedup`
-    WHERE customer_key IS NOT NULL
-  ),
-  agg AS (
-    SELECT
-      customer_key,
-      SUM(CASE WHEN DATE(occurred_at) >= DATE_SUB(CURRENT_DATE(), INTERVAL 6 DAY) THEN amount ELSE 0 END) AS payment_total_7d,
-      COUNTIF(DATE(occurred_at) >= DATE_SUB(CURRENT_DATE(), INTERVAL 6 DAY)) AS payment_count_7d
-    FROM base
-    GROUP BY customer_key
-  )
-  SELECT
-    customer_key,
-    CAST(payment_total_7d AS NUMERIC) AS payment_total_7d,
-    0 AS pricing_views_7d,
-    0 AS docs_views_7d,
-    CAST(payment_count_7d AS INT64) AS payment_count_7d,
-    CAST(payment_count_7d * 10 AS INT64) AS lead_score,
-    CASE
-      WHEN payment_count_7d * 10 >= 70 THEN "HOT"
-      WHEN payment_count_7d * 10 >= 30 THEN "WARM"
-      ELSE "COLD"
-    END AS lead_grade,
-    CURRENT_DATE() AS as_of_dt,
-    CURRENT_TIMESTAMP() AS updated_at
-  FROM agg
-) S
-ON T.customer_key = S.customer_key AND T.as_of_dt = S.as_of_dt
-WHEN MATCHED THEN UPDATE SET
-  payment_total_7d = S.payment_total_7d,
-  pricing_views_7d = S.pricing_views_7d,
-  docs_views_7d = S.docs_views_7d,
-  payment_count_7d = S.payment_count_7d,
-  lead_score = S.lead_score,
-  lead_grade = S.lead_grade,
-  updated_at = S.updated_at
-WHEN NOT MATCHED THEN
-  INSERT (customer_key, payment_total_7d, pricing_views_7d, docs_views_7d, payment_count_7d, lead_score, lead_grade, as_of_dt, updated_at)
-  VALUES (S.customer_key, S.payment_total_7d, S.pricing_views_7d, S.docs_views_7d, S.payment_count_7d, S.lead_score, S.lead_grade, S.as_of_dt, S.updated_at);
-"""
-
 default_args = {
     "owner": "you",
     "retries": 2,
@@ -254,18 +204,4 @@ with DAG(
         python_callable=load_s3_to_bq,
     )
 
-    merge_mart = BigQueryInsertJobOperator(
-        task_id='merge_mart_lead_summary',
-        configuration={
-            "query": {
-                "query": MERGE_SQL,
-                "useLegacySql": False,
-            }
-        },
-        params={
-            "project_id": os.environ["GCP_PROJECT_ID"],
-            "dataset": os.environ.get("BQ_DATASET", "lead_platform"),
-        },
-    )
-
-    load_task >> merge_mart
+    load_task

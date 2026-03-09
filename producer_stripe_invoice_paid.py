@@ -2,6 +2,7 @@ import json
 import os
 import time
 from datetime import datetime, timezone
+from typing import Set
 
 import stripe
 from confluent_kafka import Producer
@@ -12,8 +13,10 @@ load_dotenv()
 STRIPE_SECRET_KEY = os.environ["STRIPE_SECRET_KEY"]
 KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 TOPIC = os.environ.get("KAFKA_TOPIC_STRIPE_INVOICE", "stripe.invoice_events")
-POLL_WINDOW_SECONDS = int(os.environ.get("POLL_WINDOW_SECONDS", "86400"))
 CURSOR_FILE = os.environ.get("CURSOR_FILE", ".cursor_invoice_paid.json")
+
+# 테스트용: 특정 test clock만 읽기
+TEST_CLOCK_ID = os.environ.get("STRIPE_TEST_CLOCK_ID", "")
 
 stripe.api_key = STRIPE_SECRET_KEY
 
@@ -22,18 +25,17 @@ def iso_utc(ts: int) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def load_cursor_ts() -> int:
-    # unix seconds
+def load_seen_ids():
     if not os.path.exists(CURSOR_FILE):
-        return int(time.time()) - POLL_WINDOW_SECONDS
+        return set()
     with open(CURSOR_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
-    return int(data.get("last_seen_created", int(time.time()) - POLL_WINDOW_SECONDS))
+    return set(data.get("seen_invoice_ids", []))
 
 
-def save_cursor_ts(ts: int) -> None:
+def save_seen_ids(seen_ids) -> None:
     with open(CURSOR_FILE, "w", encoding="utf-8") as f:
-        json.dump({"last_seen_created": ts}, f)
+        json.dump({"seen_invoice_ids": sorted(seen_ids)}, f)
 
 
 def build_event(invoice: dict) -> dict:
@@ -48,9 +50,9 @@ def build_event(invoice: dict) -> dict:
     return {
         "event_source": "stripe",
         "event_name": "invoice_paid",
-        "event_id": invoice["id"],  # in_...
-        "customer_key": invoice.get("customer_email"),  # email
-        "customer_key_fallback": invoice.get("customer"),  # cus_...
+        "event_id": invoice["id"],
+        "customer_key": invoice.get("customer_email"),
+        "customer_key_fallback": invoice.get("customer"),
         "occurred_at": iso_utc(paid_at),
         "amount": amount_dollars,
         "currency": invoice.get("currency"),
@@ -63,34 +65,40 @@ def build_event(invoice: dict) -> dict:
             "paid_at": st.get("paid_at"),
             "number": invoice.get("number"),
             "hosted_invoice_url": invoice.get("hosted_invoice_url"),
+            "test_clock": invoice.get("test_clock"),
         },
     }
 
 
 def main():
+    print(f"[producer] kafka_bootstrap={KAFKA_BOOTSTRAP}, topic={TOPIC}")
+    print(f"[producer] test_clock_id={TEST_CLOCK_ID}")
+
     producer = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP})
+    seen_ids = load_seen_ids()
 
-    cursor = load_cursor_ts()
-    now = int(time.time())
-    created_gte = cursor
-    created_lte = now
-
-    print(f"[producer] polling invoices created in [{iso_utc(created_gte)} .. {iso_utc(created_lte)}]")
-
-    params = {"limit": 100, "created": {"gte": created_gte, "lte": created_lte}}
-    invoices = stripe.Invoice.list(**params)
-
-    max_created_seen = cursor
     sent = 0
-    scanned = 0
+    scanned_customers = 0
+    scanned_invoices = 0
 
-    while True:
-        data = invoices.get("data", [])
-        for inv in data:
-            scanned += 1
-            inv_created = int(inv["created"])
-            if inv_created > max_created_seen:
-                max_created_seen = inv_created
+    if not TEST_CLOCK_ID:
+        raise ValueError("STRIPE_TEST_CLOCK_ID is not set")
+
+    customers = stripe.Customer.list(test_clock=TEST_CLOCK_ID, limit=100)
+
+    for cust in customers.auto_paging_iter():
+        scanned_customers += 1
+        customer_id = cust["id"]
+        customer_email = cust.get("email")
+        print(f"[producer] checking customer={customer_id}, email={customer_email}")
+
+        invoices = stripe.Invoice.list(customer=customer_id, limit=100)
+
+        for inv in invoices.auto_paging_iter():
+            scanned_invoices += 1
+
+            if inv["id"] in seen_ids:
+                continue
 
             if inv.get("status") != "paid":
                 continue
@@ -100,17 +108,17 @@ def main():
             value = json.dumps(event, ensure_ascii=False).encode("utf-8")
 
             producer.produce(TOPIC, key=key, value=value)
+            seen_ids.add(inv["id"])
             sent += 1
 
-        producer.flush()
+    producer.flush()
+    save_seen_ids(seen_ids)
 
-        if not invoices.get("has_more"):
-            break
-        last_id = data[-1]["id"]
-        invoices = stripe.Invoice.list(**params, starting_after=last_id)
-
-    save_cursor_ts(max_created_seen)
-    print(f"[producer] scanned={scanned}, sent_paid={sent}, cursor_saved={iso_utc(max_created_seen)}")
+    print(
+        f"[producer] scanned_customers={scanned_customers}, "
+        f"scanned_invoices={scanned_invoices}, sent_paid={sent}, "
+        f"seen_ids={len(seen_ids)}"
+    )
 
 
 if __name__ == "__main__":

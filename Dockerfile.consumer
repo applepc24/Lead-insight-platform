@@ -1,0 +1,8 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.consumer.txt /app/requirements.consumer.txt
+RUN pip install --no-cache-dir -r /app/requirements.consumer.txt
+
+COPY . /app

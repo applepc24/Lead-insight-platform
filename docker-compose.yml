@@ -1,31 +1,89 @@
+version: "3.8"
+
 services:
-  broker:
+  kafka:
     image: apache/kafka:3.7.0
-    container_name: broker
-    hostname: broker
     ports:
       - "9092:9092"
     environment:
-      # KRaft single node
-      KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker:29093
+      KAFKA_NODE_ID: 1
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
 
-      # Listeners
-      KAFKA_LISTENERS: PLAINTEXT://broker:29092,CONTROLLER://broker:29093,PLAINTEXT_HOST://0.0.0.0:9092
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://host.docker.internal:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
 
-      # Log dirs
-      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
-
-      # single node dev defaults
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
 
-      # IMPORTANT: use a UUID-ish cluster id (stable)
-      CLUSTER_ID: 8c1b6c7b-6f4c-4b2d-9b3d-4b2a0d6a1f77
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      
+    restart: unless-stopped
+
+  consumer-stripe-s3:
+    build:
+      context: .
+      dockerfile: Dockerfile.consumer
+    container_name: consumer-stripe-s3
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_TOPIC_STRIPE_INVOICE: stripe.invoice_events
+
+      AWS_REGION: ap-northeast-2
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+
+      S3_BUCKET: ${S3_BUCKET}
+      S3_PREFIX: raw/stripe/invoices
+
+      S3_FLUSH_MAX_RECORDS: 200
+      S3_FLUSH_MAX_SECONDS: 5
+    command: python3 consumer_kafka_to_s3_raw.py
+    restart: unless-stopped
+
+  consumer-web-s3:
+    build:
+      context: .
+      dockerfile: Dockerfile.consumer
+    container_name: consumer-web-s3
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_TOPIC_WEB_EVENTS: web.user_events
+
+      AWS_REGION: ap-northeast-2
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+
+      S3_BUCKET: ${S3_BUCKET}
+      S3_PREFIX_WEB: raw/web/events
+
+      S3_FLUSH_MAX_RECORDS: 1000
+      S3_FLUSH_MAX_SECONDS: 60
+    command: python3 consumer_kafka_to_s3_raw_web.py
+    restart: unless-stopped
+
+  producer-web:
+    build:
+      context: .
+      dockerfile: Dockerfile.consumer
+    container_name: producer-web
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_TOPIC_WEB_EVENTS: web.user_events
+    command: python3 producer_web_events.py
+    restart: unless-stopped
+volumes:
+  kafka-data:

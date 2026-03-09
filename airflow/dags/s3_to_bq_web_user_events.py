@@ -7,7 +7,7 @@ from typing import List
 
 import boto3
 from airflow import DAG
-from airflow.operators.python import PythonOperator
+from airflow.operators.python import PythonOperator # type: ignore
 from google.cloud import bigquery
 
 
