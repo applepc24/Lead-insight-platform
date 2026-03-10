@@ -7,7 +7,7 @@ from typing import List, Optional
 from datetime import datetime, timezone
 
 import boto3
-from confluent_kafka import Consumer
+from confluent_kafka import Consumer, Producer
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -15,6 +15,7 @@ load_dotenv()
 # Kafka
 BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 TOPIC = os.environ.get("KAFKA_TOPIC_WEB_EVENTS", "web.user_events")
+DLQ_TOPIC = os.environ.get("KAFKA_DLQ_TOPIC_WEB", "web.user_events_dlq")
 
 # S3
 AWS_REGION = os.environ.get("AWS_REGION", "ap-northeast-2")
@@ -61,6 +62,8 @@ def upload_lines(s3, dt: str, hour: str, lines: List[str]) -> str:
 def main():
     s3 = boto3.client("s3", region_name=AWS_REGION)
 
+    dlq_producer = Producer({"bootstrap.servers": BOOTSTRAP})
+
     c = Consumer({
         "bootstrap.servers": BOOTSTRAP,
         "group.id": "raw-writer-web-s3-v1",
@@ -73,6 +76,7 @@ def main():
     print(f"[consumer-s3-web] topic={TOPIC}, bootstrap={BOOTSTRAP}")
     print(f"[consumer-s3-web] s3://{S3_BUCKET}/{S3_PREFIX}/dt=YYYY-MM-DD/hour=HH/part-*.jsonl")
     print(f"[consumer-s3-web] flush: max_records={MAX_RECORDS}, max_seconds={MAX_SECONDS}")
+    print(f"[consumer-web] dlq_topic={DLQ_TOPIC}")
 
     buf = Buffer()
     last_msg = None
@@ -90,15 +94,42 @@ def main():
         nonlocal last_msg
         if not buf.lines or buf.dt is None or buf.hour is None:
             return
-        key = upload_lines(s3, buf.dt, buf.hour, buf.lines)
-        print(f"[flush-web] uploaded {len(buf.lines)} records -> s3://{S3_BUCKET}/{key}")
+        
+        try:
+            key = upload_lines(s3, buf.dt, buf.hour, buf.lines)
+            print(f"[flush-web] uploaded {len(buf.lines)} records -> s3://{S3_BUCKET}/{key}")
 
-        # 업로드 성공 후에만 commit
-        if last_msg is not None:
-            c.commit(message=last_msg, asynchronous=False)
-            last_msg = None
+            # 업로드 성공 후에만 commit
+            if last_msg is not None:
+                c.commit(message=last_msg, asynchronous=False)
+                last_msg = None
 
-        buf.reset()
+            buf.reset()
+        except Exception as e:
+            print("[DLQ-web] failed to write raw output:", e)
+
+            dlq_payload = {
+                "error_type": "raw_write_error",
+                "retry_count": 0,
+                "original_lines": buf.lines,
+                "error": str(e),
+                "failed_at": time.time(),
+                "source_topic": TOPIC,
+                "stage": "raw_write",
+                "dt": buf.dt,
+                "hour": buf.hour,
+            }
+            dlq_producer.produce(
+                DLQ_TOPIC,
+                value=json.dumps(dlq_payload, ensure_ascii=False).encode("utf-8")   
+            )
+            dlq_producer.flush()
+
+            if last_msg is not None:
+                c.commit(message=last_msg, asynchronous=False)
+                last_msg = None
+
+            buf.reset()
 
     try:
         while True:
@@ -113,11 +144,27 @@ def main():
                 print("[consumer-s3-web] error:", msg.error())
                 continue
 
-            event = json.loads(msg.value().decode("utf-8"))
+            try:
+                event = json.loads(msg.value().decode("utf-8"))
+            
+            except Exception as e:
+                print("[DLQ-web] failed to parse:", e)
 
-            # ✅ web 이벤트만 (안전장치)
-            if event.get("event_source") != "web":
-                # 스킵해도 offset은 앞으로 가야 하므로 commit
+                dlq_payload = {
+                    "error_type": "parse_error",
+                    "retry_count": 0,
+                    "original_value": msg.value().decode("utf-8", errors="replace"),
+                    "error": str(e),
+                    "failed_at": time.time(),
+                    "source_topic": TOPIC,
+                }
+
+                dlq_producer.produce(
+                    DLQ_TOPIC,
+                    value=json.dumps(dlq_payload, ensure_ascii=False).encode("utf-8")
+                )
+                dlq_producer.flush()
+
                 c.commit(message=msg, asynchronous=False)
                 continue
 

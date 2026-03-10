@@ -37,6 +37,7 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       KAFKA_TOPIC_STRIPE_INVOICE: stripe.invoice_events
+      KAFKA_DLQ_TOPIC: stripe.invoice_events_dlq
 
       AWS_REGION: ap-northeast-2
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
@@ -60,6 +61,7 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       KAFKA_TOPIC_WEB_EVENTS: web.user_events
+      KAFKA_DLQ_TOPIC_WEB: web.user_events_dlq
 
       AWS_REGION: ap-northeast-2
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}

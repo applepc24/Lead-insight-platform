@@ -6,14 +6,17 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 import boto3
-from confluent_kafka import Consumer
+from confluent_kafka import Consumer, Producer
 from dotenv import load_dotenv
+from pathlib import Path
+
 
 load_dotenv()
 
 # Kafka
 BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 TOPIC = os.environ.get("KAFKA_TOPIC_STRIPE_INVOICE", "stripe.invoice_events")
+DLQ_TOPIC = os.environ.get("KAFKA_DLQ_TOPIC", "stripe.invoice_events_dlq")
 
 # S3
 AWS_REGION = os.environ.get("AWS_REGION", "ap-northeast-2")
@@ -23,6 +26,9 @@ S3_PREFIX = os.environ.get("S3_PREFIX", "raw/stripe/invoices")
 # Buffer flush policy
 MAX_RECORDS = int(os.environ.get("S3_FLUSH_MAX_RECORDS", "200"))   # N개 모이면 업로드
 MAX_SECONDS = int(os.environ.get("S3_FLUSH_MAX_SECONDS", "5"))     # 또는 T초마다 업로드
+
+OUTPUT_MODE = os.getenv("OUTPUT_MODE", "s3")  # s3 | local
+LOCAL_OUTPUT_DIR = os.getenv("LOCAL_OUTPUT_DIR", "tmp_e2e_raw")
 
 def dt_hour_from_occurred_at(occurred_at: str) -> tuple[str, str]:
     # "2026-03-04T09:32:14Z" -> ("2026-03-04", "09")
@@ -55,6 +61,18 @@ def upload_lines(s3, dt: str, hour: str, lines: List[str]) -> str:
     s3.put_object(Bucket=S3_BUCKET, Key=key, Body=body, ContentType="application/x-ndjson")
     return key
 
+
+def write_lines_to_local(base_dir: str, dt: str, hour: str, lines: List[str]) -> str:
+    ts_ms = int(time.time() * 1000)
+    file_dir = Path(base_dir) / f"dt={dt}" / f"hour={hour}"
+    file_dir.mkdir(parents=True, exist_ok=True)
+
+    file_path = file_dir / f"part-{ts_ms}-{uuid.uuid4().hex}.jsonl"
+    body = "\n".join(lines) + "\n"
+    file_path.write_text(body, encoding="utf-8")
+
+    return str(file_path)
+
 def main():
     s3 = boto3.client("s3", region_name=AWS_REGION)
 
@@ -68,7 +86,10 @@ def main():
     })
     c.subscribe([TOPIC])
 
+    dlq_producer = Producer({"bootstrap.servers": BOOTSTRAP})
+
     print(f"[consumer-s3] topic={TOPIC}, bootstrap={BOOTSTRAP}")
+    print(f"[consumer-s3] dlq_topic={DLQ_TOPIC}")
     print(f"[consumer-s3] s3://{S3_BUCKET}/{S3_PREFIX}/dt=YYYY-MM-DD/hour=HH/part-*.jsonl")
     print(f"[consumer-s3] flush: max_records={MAX_RECORDS}, max_seconds={MAX_SECONDS}")
 
@@ -89,15 +110,45 @@ def main():
         nonlocal last_flush, last_msg
         if not buf.lines or buf.dt is None or buf.hour is None:
             return
-        key = upload_lines(s3, buf.dt, buf.hour, buf.lines)
-        print(f"[flush] uploaded {len(buf.lines)} records -> s3://{S3_BUCKET}/{key}")
-        # 업로드 성공 후에만 commit: at-least-once
-        if last_msg is not None:
-            c.commit(message=last_msg, asynchronous=False)
-            last_msg = None
-        
-        buf.reset()
-        last_flush = time.time()
+        try:
+            if OUTPUT_MODE == "local":
+                key = write_lines_to_local(LOCAL_OUTPUT_DIR, buf.dt, buf.hour, buf.lines)
+                print(f"[flush] wrote {len(buf.lines)} records -> {key}")
+            else:
+                key = upload_lines(s3, buf.dt, buf.hour, buf.lines)
+                print(f"[flush] uploaded {len(buf.lines)} records -> s3://{S3_BUCKET}/{key}")
+            
+            if last_msg is not None:
+                c.commit(message=last_msg, asynchronous=False)
+                last_msg = None
+            buf.reset()
+            last_flush = time.time()
+        except Exception as e:
+            print("[DLQ] failed to write raw output:", e)
+            dlq_payload = {
+                "error_type": "raw_write_error",
+                "retry_count": 0,
+                "original_lines": buf.lines,
+                "error": str(e),
+                "failed_at": time.time(),
+                "source_topic": TOPIC,
+                "stage": "raw_write",
+                "dt": buf.dt,
+                "hour": buf.hour,
+            }
+
+            dlq_producer.produce(
+                DLQ_TOPIC,
+                value=json.dumps(dlq_payload, ensure_ascii=False).encode("utf-8")
+            )
+            dlq_producer.flush()
+
+            if last_msg is not None:
+                c.commit(message=last_msg, asynchronous=False)
+                last_msg = None
+            
+            buf.reset()
+            last_flush = time.time()
 
     try:
         while True:
@@ -113,9 +164,32 @@ def main():
                 print("[consumer-s3] error:", msg.error())
                 continue
 
-            event = json.loads(msg.value().decode("utf-8"))
-            if event.get("event_source") != "stripe" or event.get("event_name") != "invoice_paid":
+            try:
+                event = json.loads(msg.value().decode("utf-8"))
+                if event.get("event_source") != "stripe" or event.get("event_name") != "invoice_paid":
+                    c.commit(message=msg, asynchronous=False)
+                    continue
+            except Exception as e:
+                print("[DLQ] failed to parse:", e)
+
+                dlq_payload = {
+                    "error_type": "parse_error",
+                    "retry_count": 0,
+                    "original_value": msg.value().decode("utf-8", errors="replace"),
+                    "error": str(e),
+                    "failed_at": time.time(),
+                    "source_topic": TOPIC,
+                }
+
+                dlq_producer.produce(
+                    DLQ_TOPIC,
+                    value=json.dumps(dlq_payload, ensure_ascii=False).encode("utf-8")
+                )
+                dlq_producer.flush()
+
                 c.commit(message=msg, asynchronous=False)
+                continue
+
             occurred_at = event.get("occurred_at") or "1970-01-01T00:00:00Z"
             dt, hour = dt_hour_from_occurred_at(occurred_at)
 
