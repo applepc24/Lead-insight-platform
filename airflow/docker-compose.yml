@@ -95,6 +95,22 @@ services:
       - ./secrets:/opt/airflow/secrets
       - ..:/opt/airflow/project
     command: bash -lc "airflow db init"
+  
+  grafana:
+    image: grafana/grafana:11.6.3
+    depends_on:
+      - postgres
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana-storage:/var/lib/grafana
+      - ./secrets:/opt/grafana/secrets
+      - ./provisioning:/etc/grafana/provisioning
+    restart: unless-stopped
 
 volumes:
   postgres-db-volume:
+  grafana-storage:

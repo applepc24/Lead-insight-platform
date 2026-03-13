@@ -26,3 +26,9 @@ raw/
 .DS_Store
 .vscode/
 .idea/
+
+# gcp / credentials
+*.json
+credentials/
+
+airflow/provisioning/datasources/bigquery.yaml
