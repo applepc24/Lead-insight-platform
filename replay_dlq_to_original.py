@@ -50,7 +50,10 @@ def main():
                 original_lines = payload["original_lines"]
 
                 for line in original_lines:
-                    producer.produce(TARGET_TOPIC, value=line.encode("utf-8"))
+                    producer.produce(TARGET_TOPIC, 
+                                     value=line.encode("utf-8"),
+                                     headers=[("retry_count", str(retry_count + 1).encode("utf-8"))],
+                                    )
                 producer.flush()
 
                 consumer.commit(message=msg, asynchronous=False)

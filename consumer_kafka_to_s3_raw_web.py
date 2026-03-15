@@ -44,12 +44,14 @@ class Buffer:
     hour: Optional[str] = None
     lines: List[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
+    retry_count: int = 0
 
     def reset(self):
         self.dt = None
         self.hour = None
         self.lines.clear()
         self.created_at = time.time()
+        self.retry_count = 0
 
 
 def upload_lines(s3, dt: str, hour: str, lines: List[str]) -> str:
@@ -110,7 +112,7 @@ def main():
 
             dlq_payload = {
                 "error_type": "raw_write_error",
-                "retry_count": 0,
+                "retry_count": buf.retry_count,
                 "original_lines": buf.lines,
                 "error": str(e),
                 "failed_at": time.time(),
@@ -143,6 +145,8 @@ def main():
             if msg.error():
                 print("[consumer-s3-web] error:", msg.error())
                 continue
+            headers = dict(msg.headers() or [])
+            retry_count = int(headers.get("retry_count", b"0").decode("utf-8"))
 
             try:
                 event = json.loads(msg.value().decode("utf-8"))
@@ -152,7 +156,7 @@ def main():
 
                 dlq_payload = {
                     "error_type": "parse_error",
-                    "retry_count": 0,
+                    "retry_count": retry_count,
                     "original_value": msg.value().decode("utf-8", errors="replace"),
                     "error": str(e),
                     "failed_at": time.time(),
@@ -175,10 +179,12 @@ def main():
 
             if buf.dt is None:
                 buf.dt, buf.hour = dt, hour
+                buf.retry_count = retry_count
 
             if (dt != buf.dt) or (hour != buf.hour):
                 flush_and_commit()
                 buf.dt, buf.hour = dt, hour
+                buf.retry_count = retry_count
 
             buf.lines.append(json.dumps(event, ensure_ascii=False))
             last_msg = msg

@@ -2,3 +2,4 @@ boto3
 confluent-kafka
 python-dotenv
 stripe
+google-cloud-bigquery
