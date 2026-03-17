@@ -40,6 +40,8 @@ Kafka 기반 이벤트 큐를 통해 이벤트 수집과 데이터 처리 단계
 
 전체 데이터 파이프라인 구조는 다음과 같습니다.
 
+![Lead Insight Platform Architecture](./architecture/lead_insight_platform.png)
+
 ---
 
 # 4. 사용 기술 (Tech Stack)
