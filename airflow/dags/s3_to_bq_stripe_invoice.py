@@ -163,7 +163,7 @@ def load_s3_to_bq(**context):
             # BigQuery insert_rows_json은 ISO8601 string도 TIMESTAMP로 잘 받아줌(UTC 기준)
 
             bq_rows.append({
-                "event_id": e.get("event_id") or e.get("event_id") or e.get("properties", {}).get("stripe_invoice_id") or k,
+                "event_id": e.get("event_id") or e.get("properties", {}).get("stripe_invoice_id") or k,
                 "event_source": e.get("event_source"),
                 "event_name": e.get("event_name"),
                 "customer_key": e.get("customer_key"),
@@ -174,14 +174,19 @@ def load_s3_to_bq(**context):
                 "s3_key": k,
                 "ingested_at": now,
             })
-
-        # checkpoint는 “파일 단위”로 찍는다 (한 파일에 이벤트 여러 개여도 1번만)
-        append_rows_to_bq(project_id, dataset, checkpoint_table, [{
+        
+    # 1) staging 테이블 먼저 적재
+    append_rows_to_bq(project_id, dataset, target_table, bq_rows)
+    # 2) staging 적재 성공 후 checkpoint 기록
+    checkpoint_rows = [
+        {
             "s3_key": k,
             "loaded_at": now,
-        }])
-
-    append_rows_to_bq(project_id, dataset, target_table, bq_rows)
+        }
+        for k in sorted(new_keys)
+    ]
+    append_rows_to_bq(project_id, dataset, checkpoint_table, checkpoint_rows)
+    
     print(f"[dag] loaded files={len(new_keys)}, rows={len(bq_rows)}")
 
 default_args = {

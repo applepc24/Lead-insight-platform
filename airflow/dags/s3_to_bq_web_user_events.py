@@ -166,13 +166,20 @@ def load_s3_web_to_bq(**context):
                 "loaded_at": loaded_at,
             })
 
-        # 파일 단위 checkpoint
-        append_rows_to_bq(project_id, dataset, checkpoint_table, [{
+    # 1) staging 테이블 먼저 적재  
+    append_rows_to_bq(project_id, dataset, target_table, bq_rows)
+
+    # 2) staging 적재 성공 후 checkpoint 기록
+    checkpoint_rows = [
+        {
             "s3_key": k,
             "loaded_at": loaded_at,
-        }])
+        }
+        for k in sorted(new_keys)
+    ]
+    append_rows_to_bq(project_id, dataset, checkpoint_table, checkpoint_rows)
 
-    append_rows_to_bq(project_id, dataset, target_table, bq_rows)
+    
     print(f"[dag-web] loaded files={len(new_keys)}, rows={len(bq_rows)}")
 
 
