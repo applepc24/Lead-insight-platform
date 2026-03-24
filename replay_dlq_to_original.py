@@ -20,8 +20,15 @@ producer = Producer({"bootstrap.servers": BOOTSTRAP})
 
 
 def main():
+    print(f"[replay] bootstrap={BOOTSTRAP}")
+    print(f"[replay] dlq_topic={DLQ_TOPIC}")
+    print(f"[replay] target_topic={TARGET_TOPIC}")
+    print(f"[replay] group_id={GROUP_ID}")
+
+
     consumer.subscribe([DLQ_TOPIC])
     replayed = 0
+    skipped = 0
 
     try:
         while True:
@@ -33,37 +40,46 @@ def main():
                 continue
 
             payload = json.loads(msg.value().decode("utf-8"))
-            retry_count = int(payload.get("retry_count", 0))
+            job = payload.get("job", {})
+            failed_stage = payload.get("failed_stage")
             error_type = payload.get("error_type")
-
-            if error_type == "parse_error":
-                print(f"[replay] skip malformed message from {DLQ_TOPIC}")
+            retry_count = int(job.get("retry_count", 0))
+            
+            if not job:
+                print("[replay] skip: no job in payload")
                 consumer.commit(message=msg, asynchronous=False)
+                skipped += 1
                 continue
 
             if retry_count >= MAX_RETRY_COUNT:
-                print(f"[replay] skip message over max retry from {DLQ_TOPIC} retry_count={retry_count}")
+                print(f"[replay] skip: retry limit exceed job_id = {job.get('job_id')} retry_count={retry_count}")
                 consumer.commit(message=msg, asynchronous=False)
+                skipped += 1
+                continue
+            
+            if failed_stage != "fetch":
+                print(f"[replay] skip: unsupported failed stage= {failed_stage} job_id={job.get('job_id')} retry_count={retry_count}")
+                consumer.commit(message=msg, asynchronous=False)
+                skipped += 1
                 continue
 
-            if error_type == "raw_write_error":
-                original_lines = payload["original_lines"]
+            producer.produce(
+                TARGET_TOPIC,
+                key=job["job_id"].encode("utf-8"),
+                value=json.dumps(job, ensure_ascii=False).encode("utf-8"),
+            )
+            producer.flush()
 
-                for line in original_lines:
-                    producer.produce(TARGET_TOPIC, 
-                                     value=line.encode("utf-8"),
-                                     headers=[("retry_count", str(retry_count + 1).encode("utf-8"))],
-                                    )
-                producer.flush()
-
-                consumer.commit(message=msg, asynchronous=False)
-                replayed += len(original_lines)
-                print(f"[replay] resent {len(original_lines)} messages from {DLQ_TOPIC} -> {TARGET_TOPIC} retry_count={retry_count + 1}")
-                continue
+            consumer.commit(message=msg, asynchronous=False)
+            replayed += 1
+            print(
+                f"[replay] resent job_id={job.get('job_id')} "
+                f"stage={failed_stage} error={error_type} retry_count={retry_count}"
+            )
 
     finally:
         consumer.close()
-        print(f"[replay] done. replayed={replayed}")
+        print(f"[replay] done. replayed={replayed}, skipped={skipped}")
 
 
 if __name__ == "__main__":

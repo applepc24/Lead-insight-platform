@@ -47,12 +47,17 @@ def main():
 
         payload = json.loads(msg.value().decode())
 
+        job = payload.get("job", {})
+
         row = {
-            "failed_at": datetime.utcnow().isoformat(),
-            "source_topic": payload.get("source_topic"),
+            "failed_at": payload.get("failed_at", datetime.utcnow().isoformat()),
+            "failed_stage": payload.get("failed_stage"),
             "error_type": payload.get("error_type"),
-            "retry_count": payload.get("retry_count", 0),
-            "payload": json.dumps(payload),
+            "error_message": payload.get("error_message"),
+            "retry_count": job.get("retry_count", 0),
+            "source": job.get("source"),
+            "url": job.get("url"),
+            "payload": json.dumps(payload, ensure_ascii=False),
         }
 
         errors = write_to_bigquery(row)

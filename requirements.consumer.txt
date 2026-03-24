@@ -3,3 +3,4 @@ confluent-kafka
 python-dotenv
 stripe
 google-cloud-bigquery
+playwright

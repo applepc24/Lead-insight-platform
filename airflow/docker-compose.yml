@@ -23,6 +23,12 @@ services:
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
       KAFKA_BOOTSTRAP_SERVERS: host.docker.internal:9092
       KAFKA_TOPIC_STRIPE_INVOICE: stripe.invoice_events
+      KAFKA_TOPIC_JOB_FETCH: job_postings.fetch_jobs
+      KAFKA_TOPIC_JOB_DLQ: job_postings.dlq
+      BQ_STG_JOB_POSTINGS_TABLE: stg_job_postings
+      S3_PREFIX_JOB_POSTINGS: curated/job_postings
+      BQ_CHECKPOINT_TABLE: etl_loaded_s3_keys_job_postings
+      BQ_DATASET: lead_platform
       POLL_WINDOW_SECONDS: 86400
       CURSOR_FILE: /opt/airflow/project/.cursor_invoice_paid.json
 
@@ -62,6 +68,12 @@ services:
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
       KAFKA_BOOTSTRAP_SERVERS: host.docker.internal:9092
       KAFKA_TOPIC_STRIPE_INVOICE: stripe.invoice_events
+      KAFKA_TOPIC_JOB_FETCH: job_postings.fetch_jobs
+      KAFKA_TOPIC_JOB_DLQ: job_postings.dlq
+      BQ_STG_JOB_POSTINGS_TABLE: stg_job_postings
+      S3_PREFIX_JOB_POSTINGS: curated/job_postings
+      BQ_CHECKPOINT_TABLE: etl_loaded_s3_keys_job_postings
+      BQ_DATASET: lead_platform
       POLL_WINDOW_SECONDS: 86400
       CURSOR_FILE: /opt/airflow/project/.cursor_invoice_paid.json
 
@@ -86,6 +98,14 @@ services:
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
       KAFKA_BOOTSTRAP_SERVERS: host.docker.internal:9092
       KAFKA_TOPIC_STRIPE_INVOICE: stripe.invoice_events
+      KAFKA_TOPIC_JOB_FETCH: job_postings.fetch_jobs
+      KAFKA_TOPIC_JOB_DLQ: job_postings.dlq
+      BQ_STG_JOB_POSTINGS_TABLE: stg_job_postings
+      S3_PREFIX_JOB_POSTINGS: curated/job_postings
+      BQ_CHECKPOINT_TABLE: etl_loaded_s3_keys_job_postings
+      GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/secrets/gcp-sa.json
+      GCP_PROJECT_ID: ${GCP_PROJECT_ID}
+      BQ_DATASET: lead_platform
       POLL_WINDOW_SECONDS: 86400
       CURSOR_FILE: /opt/airflow/project/.cursor_invoice_paid.json
     volumes:
