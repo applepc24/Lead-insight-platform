@@ -46,7 +46,7 @@ Kafka 기반 큐를 통해 수집 요청과 처리 단계를 분리했고, Worke
 
 전체 데이터 파이프라인 구조는 다음과 같습니다.
 
-![Job Postings Data Platform Architecture](./architecture/lead_insight_platform.drawio.png)
+![Job Postings Data Platform Architecture](./architecture/job_postings_platform.drawio.png)
 
 ---
 
