@@ -8,10 +8,13 @@ import boto3
 from confluent_kafka import Consumer, Producer
 from dotenv import load_dotenv
 from datetime import datetime
+from botocore.exceptions import ClientError
 import urllib3
 from urllib.parse import urlparse
 from html import unescape
 from typing import List, Optional, Tuple, Dict
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -28,6 +31,16 @@ AWS_REGION = os.environ.get("AWS_REGION", "ap-northeast-2")
 
 def create_s3_client():
     return boto3.client("s3", region_name=AWS_REGION)
+
+def s3_object_exists(s3_client, bucket: str, key: str) -> bool:
+    try:
+        s3_client.head_object(Bucket=bucket, Key=key)
+        return True
+    except ClientError as e:
+        error_code = e.response.get("Error", {}).get("Code")
+        if error_code in ("404", "NoSuchKey", "NotFound"):
+            return False
+        raise
 
 
 def upload_json_to_s3(s3_client, bucket: str, target_key: str, data: dict) -> None:
@@ -48,7 +61,7 @@ def upload_raw_html_to_s3(s3_client, bucket: str, raw_s3_key: str, html: str) ->
     )
 
 
-def send_to_dlq(producer: Producer, job: dict, error: Exception, stage: str):
+def send_to_dlq(producer: Producer, job: dict, error: Exception, stage: str, error_type: Optional[str] = None):
     next_retry_count = int(job.get("retry_count", 0)) + 1
 
     failed_job = {
@@ -58,7 +71,7 @@ def send_to_dlq(producer: Producer, job: dict, error: Exception, stage: str):
 
     dlq_message = {
         "job": failed_job,
-        "error_type": type(error).__name__,
+        "error_type": error_type or type(error).__name__,
         "error_message": str(error),
         "failed_stage": stage,
         "failed_at": datetime.utcnow().isoformat() + "Z",
@@ -634,7 +647,7 @@ def build_processed_document(job: dict, s3_paths: dict, html: str) -> dict:
     }
 
 
-def refetch_saramin_with_canonical(url: str, html: str, timeout: int = 10) -> str:
+def refetch_saramin_with_canonical(session: requests.Session, url: str, html: str, timeout: tuple[int, int] = (3, 10),) -> str:
     hostname = urlparse(url).netloc.lower()
     if "saramin.co.kr" not in hostname:
         return html
@@ -647,11 +660,13 @@ def refetch_saramin_with_canonical(url: str, html: str, timeout: int = 10) -> st
         return html
 
     try:
-        response = requests.get(
+        verify = not should_disable_ssl_verify(canonical_url)
+
+        response = session.get(
             canonical_url,
             timeout=timeout,
             headers={"User-Agent": "Mozilla/5.0 (compatible; LeadInsightBot/0.1)"},
-            verify=False,
+            verify=verify,
         )
         response.raise_for_status()
         print(f"[worker] refetched saramin canonical url: {canonical_url}")
@@ -689,12 +704,14 @@ def build_curated_document(job: dict, s3_paths: dict, html: str) -> dict:
     }
 
 
-def fetch_html(url: str, timeout: int = 10) -> str:
-    response = requests.get(
+def fetch_html(session: requests.Session, url: str, timeout: tuple[int, int] = (3, 10)) -> str:
+    verify = not should_disable_ssl_verify(url)
+
+    response = session.get(
         url,
         timeout=timeout,
         headers={"User-Agent": "Mozilla/5.0 (compatible; LeadInsightBot/0.1)"},
-        verify=False,
+        verify=verify,
     )
     response.raise_for_status()
     return response.text
@@ -713,6 +730,58 @@ def build_s3_paths(job: dict) -> dict:
         "curated_s3_key": f"curated/job_postings/dt={dt}/{job_id}.json",
     }
 
+def create_http_session() -> requests.Session:
+    session = requests.Session()
+
+    retry_strategy = Retry(
+        total=2,
+        connect=2,
+        read=2,
+        backoff_factor=0.5,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["HEAD", "GET", "OPTIONS"],
+    )
+
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+
+    return session
+
+def should_disable_ssl_verify(url: str) -> bool:
+    hostname = urlparse(url).netloc.lower()
+
+    if "saramin.co.kr" in hostname:
+        return True
+    return False
+
+def classify_fetch_error(error: Exception) -> str:
+    if isinstance(error, requests.exceptions.ConnectTimeout):
+        return "connect_timeout"
+    if isinstance(error, requests.exceptions.ReadTimeout):
+        return "read_timeout"
+    if isinstance(error, requests.exceptions.SSLError):
+        return "ssl_error"
+    if isinstance(error, requests.exceptions.HTTPError):
+        response = getattr(error, "response", None)
+        status_code = getattr(response, "status_code", None)
+
+        if status_code is not None:
+            if 400 <= status_code < 500:
+                return f"http_4xx_{status_code}"
+            if 500 <= status_code < 600:
+                return f"http_5xx_{status_code}"
+
+        return "http_error"
+
+    if isinstance(error, requests.exceptions.ConnectionError):
+        message = str(error).lower()
+        if "name or service not known" in message or "failed to resolve" in message:
+            return "dns_error"
+        return "connection_error"
+
+    return type(error).__name__
+
 
 def main():
     print(f"[worker] kafka_bootstrap={KAFKA_BOOTSTRAP}, topic={FETCH_TOPIC}, group_id={GROUP_ID}")
@@ -720,6 +789,7 @@ def main():
     consumer = create_consumer()
     producer = create_producer()
     s3_client = create_s3_client()
+    http_session = create_http_session()
     consumer.subscribe([FETCH_TOPIC])
 
     try:
@@ -746,19 +816,27 @@ def main():
 
 
             s3_paths = build_s3_paths(job)
-
             print("[worker] computed S3 paths:")
             print(json.dumps(s3_paths, indent=2, ensure_ascii=False))
 
+            if s3_object_exists(s3_client, S3_BUCKET, s3_paths["curated_s3_key"]):
+                print(
+                    f"[worker] skip duplicate job_id={job['job_id']} "
+                    f"because curated already exists: s3://{S3_BUCKET}/{s3_paths['curated_s3_key']}"
+                )
+                consumer.commit(message=msg, asynchronous=False)
+                continue
+
 
             try:
-                html = fetch_html(job["url"])
-                html = refetch_saramin_with_canonical(job["url"], html)
+                html = fetch_html(http_session, job["url"])
+                html = refetch_saramin_with_canonical(http_session, job["url"], html)
 
                 print(f"[worker] fetched html length={len(html)}")
             except Exception as e:
-                print(f"[worker] fetch failed")
-                send_to_dlq(producer, job, e, "fetch")
+                error_type = classify_fetch_error(e)
+                print(f"[worker] fetch failed error_type={error_type}")
+                send_to_dlq(producer, job, e, "fetch", error_type=error_type)
 
                 consumer.commit(message=msg, asynchronous=False)
                 continue
@@ -789,9 +867,8 @@ def main():
                 upload_json_to_s3(s3_client, S3_BUCKET, s3_paths["curated_s3_key"], curated_doc)
             except Exception as e:
                 print("[worker] curated upload failed")
-
-                consumer.commit(message=msg, asynchronous=False)
                 send_to_dlq(producer, job, e, "curated")
+                consumer.commit(message=msg, asynchronous=False)
                 continue
             
 

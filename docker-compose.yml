@@ -121,6 +121,24 @@ services:
       - ./airflow/secrets:/app/secrets
     command: python3 consumer_dlq_to_bigquery.py
     restart: unless-stopped
+  
+  consumer-dlq-bq:
+    build:
+      context: .
+      dockerfile: Dockerfile.consumer
+    container_name: consumer-dlq-bq
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_DLQ_TOPIC: job_postings.dlq
+      GCP_PROJECT_ID: ${GCP_PROJECT_ID}
+      BQ_DATASET: ${BQ_DATASET}
+      GOOGLE_APPLICATION_CREDENTIALS: /app/secrets/gcp-sa.json
+    volumes:
+      - ./airflow/secrets:/app/secrets
+    command: python3 consumer_dlq_to_bigquery.py
+    restart: unless-stopped
 
 volumes:
   kafka-data:
