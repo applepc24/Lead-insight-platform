@@ -2,6 +2,5 @@ apache-airflow-providers-amazon
 apache-airflow-providers-google
 boto3
 google-cloud-bigquery
-stripe
 confluent-kafka
 python-dotenv

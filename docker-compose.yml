@@ -25,30 +25,6 @@ services:
       
     restart: unless-stopped
 
-  consumer-stripe-s3:
-    build:
-      context: .
-      dockerfile: Dockerfile.consumer
-    container_name: consumer-stripe-s3
-    depends_on:
-      - kafka
-    environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      KAFKA_TOPIC_STRIPE_INVOICE: stripe.invoice_events
-      KAFKA_DLQ_TOPIC: stripe.invoice_events_dlq
-
-      AWS_REGION: ap-northeast-2
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-
-      S3_BUCKET: ${S3_BUCKET}
-      S3_PREFIX: raw/stripe/invoices
-
-      S3_FLUSH_MAX_RECORDS: 200
-      S3_FLUSH_MAX_SECONDS: 5
-    command: python3 consumer_kafka_to_s3_raw.py
-    restart: unless-stopped
-
   consumer-web-s3:
     build:
       context: .
@@ -104,24 +80,6 @@ services:
     command: python3 consumer_dlq_to_bigquery.py
     restart: unless-stopped
 
-  consumer-dlq-bq-stripe:
-    build:
-      context: .
-      dockerfile: Dockerfile.consumer
-    container_name: consumer-dlq-bq-stripe
-    depends_on:
-      - kafka
-    environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      KAFKA_DLQ_TOPIC: stripe.invoice_events_dlq
-      GCP_PROJECT_ID: ${GCP_PROJECT_ID}
-      BQ_DATASET: ${BQ_DATASET}
-      GOOGLE_APPLICATION_CREDENTIALS: /app/secrets/gcp-sa.json
-    volumes:
-      - ./airflow/secrets:/app/secrets
-    command: python3 consumer_dlq_to_bigquery.py
-    restart: unless-stopped
-  
   consumer-dlq-bq:
     build:
       context: .

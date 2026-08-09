@@ -1,7 +1,7 @@
 # Architecture Notes
 
 ## Goal
-Stripe / Web / Job Postings 이벤트를 Kafka로 수집하고,  
+Web / Job Postings 이벤트를 Kafka로 수집하고,  
 S3 raw 저장 → BigQuery 적재 → 정제/집계 → 운영 모니터링까지 이어지는 데이터 플랫폼 MVP를 구성한다.
 
 이 플랫폼의 목표는 단순 적재가 아니라 다음까지 포함하는 것이다.
@@ -27,7 +27,6 @@ S3 raw 저장 → BigQuery 적재 → 정제/집계 → 운영 모니터링까�
 - 적재 추적 및 디버깅 근거
 
 예시:
-- `raw/stripe/invoices/...`
 - `raw/web/events/...`
 - `raw/job_postings/...`
 
@@ -44,7 +43,6 @@ S3 raw 저장 → BigQuery 적재 → 정제/집계 → 운영 모니터링까�
 현재는 소스별 staging을 유지한다.
 
 예시:
-- `stg_stripe_invoice_events`
 - `stg_web_user_events`
 - `stg_job_postings`
 
@@ -60,7 +58,6 @@ S3 raw 저장 → BigQuery 적재 → 정제/집계 → 운영 모니터링까�
 - 최종 분석용 정제 데이터 제공
 
 예시:
-- `v_stripe_invoice_events_dedup`
 - `v_web_events_dedup`
 - `int_job_postings_clean`
 
@@ -71,14 +68,12 @@ S3 raw 저장 → BigQuery 적재 → 정제/집계 → 운영 모니터링까�
 
 역할:
 - 고객/운영 지표 제공
-- 리드 스코어 계산
 - 소스별 일별 집계
 - 품질 요약 지표 제공
 
 예시:
 - `dim_customer`
 - `fct_customer_daily`
-- `mart_lead_summary`
 - `mart_job_postings_daily`
 - `mart_job_postings_source_quality`
 
@@ -102,19 +97,14 @@ S3 raw 저장 → BigQuery 적재 → 정제/집계 → 운영 모니터링까�
 
 ## Current Focus
 
-현재 플랫폼은 세 가지 흐름을 중심으로 구성되어 있다.
+현재 플랫폼은 두 가지 흐름을 중심으로 구성되어 있다.
 
-### 1. Stripe 이벤트 파이프라인
+### 1. Web 이벤트 파이프라인
 - Kafka 수집
 - S3 raw 저장
 - BigQuery staging / curated / mart 구성
 
-### 2. Web 이벤트 파이프라인
-- Kafka 수집
-- S3 raw 저장
-- BigQuery staging / curated / mart 구성
-
-### 3. Job Postings 파이프라인
+### 2. Job Postings 파이프라인
 - Kafka fetch job 수집
 - Worker 기반 HTML fetch
 - S3 raw / processed / curated 저장
@@ -126,25 +116,21 @@ S3 raw 저장 → BigQuery 적재 → 정제/집계 → 운영 모니터링까�
 ## Current Assets by Layer
 
 ### Raw
-- `raw/stripe/invoices/...`
 - `raw/web/events/...`
 - `raw/job_postings/...`
 
 ### Standardized / Staging
-- `stg_stripe_invoice_events`
 - `stg_web_user_events`
 - `stg_events`
 - `stg_job_postings`
 
 ### Curated / Intermediate
-- `v_stripe_invoice_events_dedup`
 - `v_web_events_dedup`
 - `int_job_postings_clean`
 
 ### Mart
 - `dim_customer`
 - `fct_customer_daily`
-- `mart_lead_summary`
 - `mart_job_postings_daily`
 - `mart_job_postings_source_quality`
 
@@ -176,10 +162,10 @@ S3 raw 저장 → BigQuery 적재 → 정제/집계 → 운영 모니터링까�
 
 ## Event Standardization Strategy
 
-현재 Stripe / Web 이벤트 파이프라인은 source-specific staging을 유지하는 구조를 사용한다.
+현재 Web / Job Postings 파이프라인은 source-specific staging을 유지하는 구조를 사용한다.
 
-- `stg_stripe_invoice_events`
 - `stg_web_user_events`
+- `stg_job_postings`
 
 원래는 공통 이벤트 테이블(`stg_events`) 중심의 완전한 통합 레이어를 고려했지만,  
 현재 단계에서는 소스 수가 적고 이벤트 의미가 상이하므로 source-specific staging을 우선 유지한다.
@@ -349,10 +335,8 @@ Replay 실행 자체는 Airflow에서 담당하고,
 ### Hard Validation Checks
 규칙 위반 시 실패로 간주할 수 있는 검증이다.
 
-- Stripe dedup event_id uniqueness
 - Web dedup event_id uniqueness
 - `stg_events` core field not null
-- Stripe required properties key existence
 - `int_job_postings_clean` required fields check
 - `int_job_postings_clean` duplicate content hash candidate monitoring
 - Job postings description fill-rate threshold
@@ -361,7 +345,6 @@ Replay 실행 자체는 Airflow에서 담당하고,
 상시 장애 처리보다는 운영 점검 및 관찰 목적에 가까운 검증이다.
 
 - `stg_events` freshness
-- `mart_lead_summary` freshness
 - web properties basic shape
 - job postings source quality trend
 - DLQ retry distribution
@@ -375,7 +358,6 @@ Replay 실행 자체는 Airflow에서 담당하고,
 
 ### 1. Dedup uniqueness check
 대상:
-- `v_stripe_invoice_events_dedup`
 - `v_web_events_dedup`
 
 실패 조건:

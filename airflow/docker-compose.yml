@@ -20,17 +20,13 @@ services:
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
-      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
       KAFKA_BOOTSTRAP_SERVERS: host.docker.internal:9092
-      KAFKA_TOPIC_STRIPE_INVOICE: stripe.invoice_events
       KAFKA_TOPIC_JOB_FETCH: job_postings.fetch_jobs
       KAFKA_TOPIC_JOB_DLQ: job_postings.dlq
       BQ_STG_JOB_POSTINGS_TABLE: stg_job_postings
       S3_PREFIX_JOB_POSTINGS: curated/job_postings
       BQ_CHECKPOINT_TABLE: etl_loaded_s3_keys_job_postings
       BQ_DATASET: lead_platform
-      POLL_WINDOW_SECONDS: 86400
-      CURSOR_FILE: /opt/airflow/project/.cursor_invoice_paid.json
 
       # ✅ AWS (S3)
       AWS_REGION: ap-northeast-2
@@ -65,17 +61,13 @@ services:
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       S3_BUCKET: load-insight-raw-wonjun
-      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
       KAFKA_BOOTSTRAP_SERVERS: host.docker.internal:9092
-      KAFKA_TOPIC_STRIPE_INVOICE: stripe.invoice_events
       KAFKA_TOPIC_JOB_FETCH: job_postings.fetch_jobs
       KAFKA_TOPIC_JOB_DLQ: job_postings.dlq
       BQ_STG_JOB_POSTINGS_TABLE: stg_job_postings
       S3_PREFIX_JOB_POSTINGS: curated/job_postings
       BQ_CHECKPOINT_TABLE: etl_loaded_s3_keys_job_postings
       BQ_DATASET: lead_platform
-      POLL_WINDOW_SECONDS: 86400
-      CURSOR_FILE: /opt/airflow/project/.cursor_invoice_paid.json
 
       GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/secrets/gcp-sa.json
       GCP_PROJECT_ID: ${GCP_PROJECT_ID}
@@ -95,9 +87,7 @@ services:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
       KAFKA_BOOTSTRAP_SERVERS: host.docker.internal:9092
-      KAFKA_TOPIC_STRIPE_INVOICE: stripe.invoice_events
       KAFKA_TOPIC_JOB_FETCH: job_postings.fetch_jobs
       KAFKA_TOPIC_JOB_DLQ: job_postings.dlq
       BQ_STG_JOB_POSTINGS_TABLE: stg_job_postings
@@ -106,8 +96,6 @@ services:
       GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/secrets/gcp-sa.json
       GCP_PROJECT_ID: ${GCP_PROJECT_ID}
       BQ_DATASET: lead_platform
-      POLL_WINDOW_SECONDS: 86400
-      CURSOR_FILE: /opt/airflow/project/.cursor_invoice_paid.json
     volumes:
       - ./dags:/opt/airflow/dags
       - ./logs:/opt/airflow/logs
