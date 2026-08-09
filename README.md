@@ -6,12 +6,17 @@ Job Postings Data Platform은 여러 채용 사이트의 공고 데이터를 수
 
 이 프로젝트의 목표는 단순히 HTML을 수집하는 수준을 넘어서, **수집 → 저장 → 정제 → 품질 검증 → 모니터링 → 장애 복구**까지 포함한 실제 데이터 플랫폼의 전체 흐름을 직접 설계하고 구현하는 것이었습니다.
 
-현재 파이프라인은 다음과 같은 채용공고 소스를 처리합니다.
+현재 파이프라인은 다음 5개 채용공고 소스를 처리합니다.
 
 - Wanted
 - GroupBy
 - Catch
-- (확장 가능: Saramin, JobKorea 등)
+- Saramin
+- JobKorea
+
+사이트마다 렌더링 방식이 달라 수집 전략을 분리했습니다. **원티드는 JS 렌더링 SPA라 Playwright로 브라우저를 띄워 스크롤 lazy-load까지 유발한 뒤 렌더된 DOM에서 URL을 추출**하고, **잡코리아는 SSR이라 requests 한 번으로 충분**합니다. Collector는 수집 방식과 무관하게 동일한 형식의 fetch job 메시지를 발행하므로, Worker는 URL이 어떻게 수집됐는지 알 필요가 없습니다.
+
+Worker는 hostname으로 사이트별 파서를 선택하되 **모든 파서가 동일한 6개 필드를 반환**하도록 계약을 고정했습니다. 덕분에 하류 계층(BigQuery 적재·마트)은 출처 사이트를 몰라도 되고, 새 사이트 추가 비용은 파서 함수 1개 수준입니다.
 
 Kafka 기반 큐를 통해 수집 요청과 처리 단계를 분리했고, Worker가 공고 페이지를 fetch하여 S3에 raw / processed / curated 형태로 저장하도록 구성했습니다. 또한 DLQ와 Replay 메커니즘을 통해 실패한 fetch 작업을 복구할 수 있도록 설계했으며, Airflow를 사용해 BigQuery 적재 및 품질 검증을 수행하고 Grafana를 통해 운영 상태를 모니터링합니다.
 
@@ -57,7 +62,8 @@ Kafka 기반 큐를 통해 수집 요청과 처리 단계를 분리했고, Worke
 
 ### Data Collection / Processing
 - Python Worker
-- Requests
+- Playwright (JS 렌더링 사이트 수집)
+- Requests (SSR 사이트 수집 / 상세 페이지 fetch)
 - boto3
 
 ### Data Storage

@@ -1,12 +1,12 @@
 # Architecture Notes
 
 ## Goal
-Stripe / Web / Job Postings 이벤트를 Kafka로 수집하고,  
+여러 채용 사이트의 공고를 Kafka 기반 fetch job으로 수집하고,  
 S3 raw 저장 → BigQuery 적재 → 정제/집계 → 운영 모니터링까지 이어지는 데이터 플랫폼 MVP를 구성한다.
 
 이 플랫폼의 목표는 단순 적재가 아니라 다음까지 포함하는 것이다.
 
-- 비동기 이벤트 수집
+- 비동기 수집 요청 처리
 - 원본 데이터 보존
 - 정제 및 중복 제거
 - mart 레이어 제공
@@ -18,7 +18,7 @@ S3 raw 저장 → BigQuery 적재 → 정제/집계 → 운영 모니터링까�
 ## Data Layers
 
 ### 1. Raw
-외부/서비스 이벤트 원본을 가공 없이 저장하는 레이어다.
+수집한 공고 페이지 원본을 가공 없이 저장하는 레이어다.
 
 역할:
 - 원본 보존
@@ -27,25 +27,19 @@ S3 raw 저장 → BigQuery 적재 → 정제/집계 → 운영 모니터링까�
 - 적재 추적 및 디버깅 근거
 
 예시:
-- `raw/stripe/invoices/...`
-- `raw/web/events/...`
-- `raw/job_postings/...`
+- `raw/job_postings/source={source}/dt={dt}/{job_id}.html`
 
 ---
 
 ### 2. Standardized / Staging
-소스별로 다른 구조를 가진 데이터를 분석 가능한 테이블 형태로 적재하는 레이어다.
+사이트마다 다른 구조의 공고 문서를 분석 가능한 테이블 형태로 적재하는 레이어다.
 
 역할:
-- 소스별 이벤트/문서를 BigQuery에서 조회 가능한 구조로 적재
+- 정제된 공고 문서를 BigQuery에서 조회 가능한 구조로 적재
 - downstream 정제/품질 체크의 입력
-- source-specific schema 유지
-
-현재는 소스별 staging을 유지한다.
+- 사이트별 차이는 Worker 파싱 단계에서 흡수하고, staging은 단일 스키마를 유지
 
 예시:
-- `stg_stripe_invoice_events`
-- `stg_web_user_events`
 - `stg_job_postings`
 
 ---
@@ -60,8 +54,6 @@ S3 raw 저장 → BigQuery 적재 → 정제/집계 → 운영 모니터링까�
 - 최종 분석용 정제 데이터 제공
 
 예시:
-- `v_stripe_invoice_events_dedup`
-- `v_web_events_dedup`
 - `int_job_postings_clean`
 
 ---
@@ -70,15 +62,11 @@ S3 raw 저장 → BigQuery 적재 → 정제/집계 → 운영 모니터링까�
 비즈니스/운영/분석에서 바로 사용할 수 있도록 요약·집계한 레이어다.
 
 역할:
-- 고객/운영 지표 제공
-- 리드 스코어 계산
+- 운영/분석 지표 제공
 - 소스별 일별 집계
 - 품질 요약 지표 제공
 
 예시:
-- `dim_customer`
-- `fct_customer_daily`
-- `mart_lead_summary`
 - `mart_job_postings_daily`
 - `mart_job_postings_source_quality`
 
@@ -94,27 +82,16 @@ S3 raw 저장 → BigQuery 적재 → 정제/집계 → 운영 모니터링까�
 - 장애 복구 지원
 
 예시:
-- `etl_loaded_s3_keys`
-- `etl_loaded_s3_keys_web`
+- `etl_loaded_s3_keys_job_postings`
 - `dlq_events`
 
 ---
 
 ## Current Focus
 
-현재 플랫폼은 세 가지 흐름을 중심으로 구성되어 있다.
+현재 플랫폼은 채용공고 파이프라인 하나를 중심으로 구성되어 있다.
 
-### 1. Stripe 이벤트 파이프라인
-- Kafka 수집
-- S3 raw 저장
-- BigQuery staging / curated / mart 구성
-
-### 2. Web 이벤트 파이프라인
-- Kafka 수집
-- S3 raw 저장
-- BigQuery staging / curated / mart 구성
-
-### 3. Job Postings 파이프라인
+### Job Postings 파이프라인
 - Kafka fetch job 수집
 - Worker 기반 HTML fetch
 - S3 raw / processed / curated 저장
@@ -126,31 +103,20 @@ S3 raw 저장 → BigQuery 적재 → 정제/집계 → 운영 모니터링까�
 ## Current Assets by Layer
 
 ### Raw
-- `raw/stripe/invoices/...`
-- `raw/web/events/...`
 - `raw/job_postings/...`
 
 ### Standardized / Staging
-- `stg_stripe_invoice_events`
-- `stg_web_user_events`
-- `stg_events`
 - `stg_job_postings`
 
 ### Curated / Intermediate
-- `v_stripe_invoice_events_dedup`
-- `v_web_events_dedup`
 - `int_job_postings_clean`
 
 ### Mart
-- `dim_customer`
-- `fct_customer_daily`
-- `mart_lead_summary`
 - `mart_job_postings_daily`
 - `mart_job_postings_source_quality`
 
 ### Operational / ETL Control
-- `etl_loaded_s3_keys`
-- `etl_loaded_s3_keys_web`
+- `etl_loaded_s3_keys_job_postings`
 - `dlq_events`
 
 ---
@@ -174,46 +140,47 @@ S3 raw 저장 → BigQuery 적재 → 정제/집계 → 운영 모니터링까�
 
 ---
 
-## Event Standardization Strategy
+## Source Standardization Strategy
 
-현재 Stripe / Web 이벤트 파이프라인은 source-specific staging을 유지하는 구조를 사용한다.
+채용 사이트는 렌더링 방식도, 공고 페이지의 메타데이터 구조도 제각각이다.  
+이 차이를 **Collector와 Worker 두 단계에서 흡수**하고, 그 아래로는 단일 스키마만 흐르게 한다.
 
-- `stg_stripe_invoice_events`
-- `stg_web_user_events`
+### 1. Collector — 렌더링 방식에 따른 수집 전략
 
-원래는 공통 이벤트 테이블(`stg_events`) 중심의 완전한 통합 레이어를 고려했지만,  
-현재 단계에서는 소스 수가 적고 이벤트 의미가 상이하므로 source-specific staging을 우선 유지한다.
+목록 페이지에서 상세 URL을 추출하는 단계로, 사이트 렌더링 방식에 따라 도구가 갈린다.
 
-즉, 현재 전략은 다음과 같다.
+| 대상 | 방식 | 이유 |
+|---|---|---|
+| Wanted | Playwright (headless Chromium) | JS 렌더링 SPA. 초기 HTML에 공고 링크가 없어 스크롤로 lazy-load를 유발해야 한다 |
+| JobKorea | requests | SSR. 응답 HTML에 이미 링크가 포함되어 있어 브라우저가 불필요하다 |
 
-- 적재는 source-specific staging으로 수행
-- dedup 및 집계는 curated / fact / mart 레이어에서 수행
-- 필요 시 `stg_events` 를 공통 표준 이벤트 레이어로 확장 가능하도록 여지를 남김
+Collector는 수집 방식과 무관하게 동일한 fetch job 메시지를 Kafka에 발행한다.
 
----
+```
+{"job_id", "source", "url", "collected_at", "retry_count"}
+```
 
-### Unified standardized layer (planned / optional)
-공통 이벤트 구조로 정규화할 경우 사용할 수 있는 통합 레이어다.
+따라서 Worker는 URL이 어떤 방식으로 수집됐는지 알 필요가 없다.
 
-공통 테이블:
-- `stg_events`
+### 2. Worker — 도메인별 파싱 전략
 
-공통 필드 예시:
-- `event_source`
-- `event_name`
-- `event_id`
-- `customer_key`
-- `occurred_at`
-- `amount`
-- `properties`
-- `ingested_at`
+`extract_fields_by_domain()` 이 hostname으로 사이트별 파서를 선택한다.  
+현재 Wanted / GroupBy / Catch / Saramin / JobKorea 5개 도메인을 처리하며, 매칭되지 않으면 og:title·meta description 기반 fallback을 쓴다.
 
-이 레이어의 목적:
-- 서로 다른 SaaS 이벤트 구조를 하나의 이벤트 모델로 통합
-- downstream dedup / aggregation의 공통 입력 제공
-- 새로운 소스 확장 비용 절감
+**모든 파서는 동일한 6개 필드를 반환한다.**
 
-현재 MVP에서는 부분적으로만 고려하고 있으며, 완전한 중심 레이어로 사용하지는 않는다.
+- `company_name`, `title`, `location`, `employment_type`, `experience_level`, `description_text`
+
+파서 내부는 JSON-LD(`@type == "JobPosting"`)를 1순위로 쓰고, 없거나 필드가 비면 og:title → title → meta description 순으로 내려가는 fallback 체인을 갖는다. 사이트별로 실제 다른 것은 title/description 포맷을 정리하는 **정제 규칙**이다. (예: Saramin은 JSON-LD가 없어 meta description 파싱에 전적으로 의존한다.)
+
+일부 사이트는 파싱 외의 예외도 필요하다.
+
+- Saramin: `<link rel="canonical">` 을 읽어 실제 공고 URL로 한 번 더 fetch, SSL 검증 비활성화
+
+### 3. 결과
+
+이 계약 덕분에 downstream(`stg_job_postings` 이하)은 출처 사이트를 몰라도 된다.  
+새 사이트 추가 비용은 **파서 함수 1개 + 분기 1줄**이다.
 
 ---
 
@@ -349,10 +316,7 @@ Replay 실행 자체는 Airflow에서 담당하고,
 ### Hard Validation Checks
 규칙 위반 시 실패로 간주할 수 있는 검증이다.
 
-- Stripe dedup event_id uniqueness
-- Web dedup event_id uniqueness
-- `stg_events` core field not null
-- Stripe required properties key existence
+- `stg_job_postings` not empty
 - `int_job_postings_clean` required fields check
 - `int_job_postings_clean` duplicate content hash candidate monitoring
 - Job postings description fill-rate threshold
@@ -360,49 +324,45 @@ Replay 실행 자체는 Airflow에서 담당하고,
 ### Operational Review Checks
 상시 장애 처리보다는 운영 점검 및 관찰 목적에 가까운 검증이다.
 
-- `stg_events` freshness
-- `mart_lead_summary` freshness
-- web properties basic shape
+- `stg_job_postings` freshness
 - job postings source quality trend
 - DLQ retry distribution
 - fetch failure pattern by error_type
 
 ---
 
-## Airflow Quality Check Candidates (Phase 1)
+## Airflow Quality Checks
 
-초기 Airflow quality_check 단계에서는 실패 기준이 명확한 검증만 태스크로 올린다.
+실패 기준이 명확한 검증만 태스크로 올린다.  
+`quality_check_job_postings` DAG가 아래 5개를 순서대로 수행한다.
 
-### 1. Dedup uniqueness check
-대상:
-- `v_stripe_invoice_events_dedup`
-- `v_web_events_dedup`
+```
+[check_stg_not_empty, check_int_not_empty]
+  → check_int_required_fields
+  → check_int_no_duplicate_content_hash
+  → check_description_quality
+```
 
-실패 조건:
-- duplicate_event_id_count > 0
+### 1. Staging not empty
+대상: `stg_job_postings` / 실패 조건: row_count = 0
 
-### 2. Core not null check
-대상:
-- `stg_events`
+### 2. Intermediate not empty
+대상: `int_job_postings_clean` / 실패 조건: row_count = 0
 
-실패 조건:
-- `event_id`
-- `event_name`
-- `event_source`
-- `occurred_at`
-
-중 하나라도 null count > 0
-
-### 3. Job postings basic integrity check
-대상:
-- `int_job_postings_clean`
+### 3. Required fields check
+대상: `int_job_postings_clean`
 
 실패 조건:
 - title / original_url / source / collected_at null row 존재
 
-### 4. Job postings quality threshold
-대상:
-- `mart_job_postings_source_quality`
+### 4. Duplicate content hash check
+대상: `int_job_postings_clean`
+
+dedup 이후에도 동일 `content_hash` 가 남아 있는지 관찰한다.  
+현재 dedup 키는 `source + original_url` 이므로, 같은 공고가 다른 URL로 들어온 경우를 잡는 보조 지표다.
+
+### 5. Description quality threshold
+대상: `mart_job_postings_source_quality`
 
 실패 조건:
 - 일정 건수 이상 수집된 source에서 description fill rate가 임계치 미만
