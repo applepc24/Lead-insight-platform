@@ -6,17 +6,18 @@ Job Postings Data Platform은 여러 채용 사이트의 공고 데이터를 수
 
 이 프로젝트의 목표는 단순히 HTML을 수집하는 수준을 넘어서, **수집 → 저장 → 정제 → 품질 검증 → 모니터링 → 장애 복구**까지 포함한 실제 데이터 플랫폼의 전체 흐름을 직접 설계하고 구현하는 것이었습니다.
 
-현재 파이프라인은 다음 5개 채용공고 소스를 처리합니다.
+이 파이프라인은 **URL을 수집하는 Collector**와 **공고를 파싱하는 Worker**를 분리했습니다. 두 계층이 다루는 사이트 수가 다릅니다.
 
-- Wanted
-- GroupBy
-- Catch
-- Saramin
-- JobKorea
+| 계층 | 대상 사이트 | 역할 |
+|---|---|---|
+| **Collector** | Wanted, JobKorea | 목록 페이지에서 공고 URL을 수집해 Kafka에 발행 |
+| **Worker 파서** | Wanted, GroupBy, Catch, Saramin, JobKorea | 공고 상세 HTML에서 6개 필드 추출 |
 
-사이트마다 렌더링 방식이 달라 수집 전략을 분리했습니다. **원티드는 JS 렌더링 SPA라 Playwright로 브라우저를 띄워 스크롤 lazy-load까지 유발한 뒤 렌더된 DOM에서 URL을 추출**하고, **잡코리아는 SSR이라 requests 한 번으로 충분**합니다. Collector는 수집 방식과 무관하게 동일한 형식의 fetch job 메시지를 발행하므로, Worker는 URL이 어떻게 수집됐는지 알 필요가 없습니다.
+**Collector가 2개인데 파서가 5개인 것은 의도된 구조입니다.** Collector는 사이트별 목록 페이지 구조에 종속되지만, Worker는 URL이 어디서 왔는지 몰라도 hostname만 보고 파싱합니다. 따라서 파서만 있으면 수동 투입·다른 수집 경로로 들어온 URL도 그대로 처리됩니다. GroupBy·Catch·Saramin은 현재 파서만 구현된 상태이고, 자동 Collector는 필요할 때 추가하면 됩니다.
 
-Worker는 hostname으로 사이트별 파서를 선택하되 **모든 파서가 동일한 6개 필드를 반환**하도록 계약을 고정했습니다. 덕분에 하류 계층(BigQuery 적재·마트)은 출처 사이트를 몰라도 되고, 새 사이트 추가 비용은 파서 함수 1개 수준입니다.
+Collector 단계에서 사이트마다 렌더링 방식이 달라 수집 전략을 분리했습니다. **원티드는 JS 렌더링 SPA라 Playwright로 브라우저를 띄워 스크롤 lazy-load까지 유발한 뒤 렌더된 DOM에서 URL을 추출**하고, **잡코리아는 SSR이라 requests 한 번으로 충분**합니다. Collector는 수집 방식과 무관하게 동일한 형식의 fetch job 메시지를 발행하므로, Worker는 URL이 어떻게 수집됐는지 알 필요가 없습니다. 참고로 **공고 상세 페이지는 어느 사이트든 requests 한 번**으로 받습니다 — SEO 때문에 상세 페이지는 SSR로 내려오기 때문입니다.
+
+Worker는 hostname으로 사이트별 파서를 선택하되 **모든 파서가 동일한 6개 필드를 반환**하도록 계약을 고정했습니다. 덕분에 하류 계층(BigQuery 적재·마트)은 출처 사이트를 몰라도 됩니다. 파서 선택과 사이트별 fetch 예외(SSL 정책, canonical 재요청)는 `DOMAIN_CONFIG` 한 곳에 모아서, **새 사이트 추가는 파서 함수 1개 + 설정 한 줄**로 끝납니다.
 
 Kafka 기반 큐를 통해 수집 요청과 처리 단계를 분리했고, Worker가 공고 페이지를 fetch하여 S3에 raw / processed / curated 형태로 저장하도록 구성했습니다. 또한 DLQ와 Replay 메커니즘을 통해 실패한 fetch 작업을 복구할 수 있도록 설계했으며, Airflow를 사용해 BigQuery 적재 및 품질 검증을 수행하고 Grafana를 통해 운영 상태를 모니터링합니다.
 
@@ -129,10 +130,26 @@ Worker는 Kafka에서 fetch job을 읽고, 해당 URL의 HTML을 수집합니다
 수집 과정에서 다음을 수행합니다.
 
 - HTTP 요청 수행
-- source별 HTML 메타데이터 추출
-- canonical URL 재요청 처리 (예: Saramin)
+- source별 HTML 메타데이터 추출 (JSON-LD 우선, 없으면 og:title → title → meta description 폴백)
+- canonical URL 재요청 처리 (`DOMAIN_CONFIG`에서 켠 사이트만 — 현재 Saramin)
 - fetch 실패 시 DLQ 전송
 - raw / processed / curated 문서 생성
+
+사이트별 예외는 코드 곳곳에 흩어지지 않고 `DOMAIN_CONFIG` 한 곳에 모여 있습니다.
+
+```python
+DOMAIN_CONFIG = {
+    "wanted.co.kr": {"parser": extract_wanted_fields},
+    "saramin.co.kr": {
+        "parser": extract_saramin_fields,
+        "disable_ssl_verify": True,   # 인증서 체인이 불완전
+        "refetch_canonical": True,    # 목록 URL이 리다이렉트용
+    },
+    ...
+}
+```
+
+파서 라우팅, SSL 정책, canonical 재요청이 모두 이 표를 읽으므로 사이트를 추가하거나 뺄 때 고칠 곳이 한 군데입니다.
 
 ---
 

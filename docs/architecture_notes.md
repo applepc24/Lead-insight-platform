@@ -148,6 +148,7 @@ S3 raw 저장 → BigQuery 적재 → 정제/집계 → 운영 모니터링까�
 ### 1. Collector — 렌더링 방식에 따른 수집 전략
 
 목록 페이지에서 상세 URL을 추출하는 단계로, 사이트 렌더링 방식에 따라 도구가 갈린다.
+**자동 Collector가 구현된 것은 아래 2개다.**
 
 | 대상 | 방식 | 이유 |
 |---|---|---|
@@ -161,6 +162,12 @@ Collector는 수집 방식과 무관하게 동일한 fetch job 메시지를 Kafk
 ```
 
 따라서 Worker는 URL이 어떤 방식으로 수집됐는지 알 필요가 없다.
+이 분리 덕분에 **Collector가 없는 사이트도 파서만 있으면 처리된다** — URL을 어떤 경로로
+넣든 Worker는 hostname만 보기 때문이다. GroupBy / Catch / Saramin이 현재 그 상태다
+(파서는 구현됨, 자동 Collector는 미구현).
+
+참고로 **공고 상세 페이지 fetch는 사이트와 무관하게 requests 한 번**이다 (`fetch_html()`).
+Playwright는 목록 페이지 수집에만 쓴다 — 상세 페이지는 SEO 때문에 어차피 SSR로 내려온다.
 
 ### 2. Worker — 도메인별 파싱 전략
 
@@ -173,14 +180,53 @@ Collector는 수집 방식과 무관하게 동일한 fetch job 메시지를 Kafk
 
 파서 내부는 JSON-LD(`@type == "JobPosting"`)를 1순위로 쓰고, 없거나 필드가 비면 og:title → title → meta description 순으로 내려가는 fallback 체인을 갖는다. 사이트별로 실제 다른 것은 title/description 포맷을 정리하는 **정제 규칙**이다. (예: Saramin은 JSON-LD가 없어 meta description 파싱에 전적으로 의존한다.)
 
-일부 사이트는 파싱 외의 예외도 필요하다.
+JSON-LD에서 값을 꺼내는 부분은 `extract_from_jobposting_ld()` 로 공통화했다.
+이 함수는 값 6개를 만들어 돌려주기만 하고 **무엇을 쓸지는 각 파서가 고른다.**
+플래그 인자를 늘리면 사이트별 차이가 인자 목록에 숨지만, 이 방식은 호출부에 그대로 드러난다.
 
-- Saramin: `<link rel="canonical">` 을 읽어 실제 공고 URL로 한 번 더 fetch, SSL 검증 비활성화
+```python
+ld = extract_from_jobposting_ld(jobposting)
+result["experience_level"] = ld["experience_level"]
+# employment_type 은 잡코리아 JSON-LD 에 없어 쓰지 않는다.
+```
 
-### 3. 결과
+### 3. 도메인 설정 일원화
+
+파서 선택과 파싱 외 예외를 `DOMAIN_CONFIG` 한 곳에서 관리한다.
+이전에는 Saramin 분기가 파서 라우팅 · SSL 정책 · canonical 재요청 세 곳에 흩어져 있어,
+사이트를 추가하거나 뺄 때 세 군데를 함께 고쳐야 했다.
+
+```python
+DOMAIN_CONFIG = {
+    "wanted.co.kr": {"parser": extract_wanted_fields},
+    "saramin.co.kr": {
+        "parser": extract_saramin_fields,
+        "disable_ssl_verify": True,   # 인증서 체인이 불완전
+        "refetch_canonical": True,    # 목록에서 얻은 URL이 리다이렉트용
+    },
+    ...
+}
+```
+
+`extract_fields_by_domain()`, `should_disable_ssl_verify()`, `refetch_canonical_url()` 이
+모두 `find_domain_config()` 를 통해 이 표를 읽는다. **사이트 하나 = 정의 하나**다.
+
+### 4. 결과
 
 이 계약 덕분에 downstream(`stg_job_postings` 이하)은 출처 사이트를 몰라도 된다.  
-새 사이트 추가 비용은 **파서 함수 1개 + 분기 1줄**이다.
+새 사이트 추가 비용은 **파서 함수 1개 + `DOMAIN_CONFIG` 한 줄**이다.
+
+### 5. 파서 테스트 전략
+
+파서는 특성 테스트(characterization test)로 현재 동작을 고정해 두었다
+(`tests/test_job_postings_parsers.py`). "이래야 한다"가 아니라 "현재 이렇다"를 기록하는
+방식으로, 사이트별 비대칭(예: groupby가 `experienceRequirements` 를 읽지 않음)까지 함께 고정한다.
+리팩터링 시 테스트가 깨지면 그게 곧 동작 변경 신호가 된다.
+
+검출력은 **뮤테이션 테스트**로 확인했다 — 워커에 의도적 회귀를 심어 테스트가 잡는지 검증한다.
+이 과정에서 반환값만 검사하던 테스트의 구멍이 드러났다. `refetch_canonical_url()` 은 실패해도
+원본 html 을 돌려주므로, **"요청을 건너뛴 것"과 "요청했다 실패한 것"이 반환값으로는 구분되지 않는다.**
+조기 반환을 검증하려면 호출 여부(부작용)를 봐야 한다.
 
 ---
 
