@@ -6,14 +6,14 @@ Job Postings Data Platform은 여러 채용 사이트의 공고 데이터를 수
 
 이 프로젝트의 목표는 단순히 HTML을 수집하는 수준을 넘어서, **수집 → 저장 → 정제 → 품질 검증 → 모니터링 → 장애 복구**까지 포함한 실제 데이터 플랫폼의 전체 흐름을 직접 설계하고 구현하는 것이었습니다.
 
-이 파이프라인은 **URL을 수집하는 Collector**와 **공고를 파싱하는 Worker**를 분리했습니다. 두 계층이 다루는 사이트 수가 다릅니다.
+이 파이프라인은 **URL을 수집하는 Collector**와 **공고를 파싱하는 Worker**를 분리해서, 수집 경로와 파싱 규칙이 서로 독립적으로 확장되도록 설계했습니다.
 
 | 계층 | 대상 사이트 | 역할 |
 |---|---|---|
 | **Collector** | Wanted, JobKorea | 목록 페이지에서 공고 URL을 수집해 Kafka에 발행 |
 | **Worker 파서** | Wanted, GroupBy, Catch, Saramin, JobKorea | 공고 상세 HTML에서 6개 필드 추출 |
 
-**Collector가 2개인데 파서가 5개인 것은 의도된 구조입니다.** Collector는 사이트별 목록 페이지 구조에 종속되지만, Worker는 URL이 어디서 왔는지 몰라도 hostname만 보고 파싱합니다. 따라서 파서만 있으면 수동 투입·다른 수집 경로로 들어온 URL도 그대로 처리됩니다. GroupBy·Catch·Saramin은 현재 파서만 구현된 상태이고, 자동 Collector는 필요할 때 추가하면 됩니다.
+Collector는 사이트별 목록 페이지 구조와 렌더링 방식에 종속되지만, Worker는 hostname만 보고 파서를 선택하므로 **URL이 어떤 경로로 들어왔는지 알 필요가 없습니다.** 덕분에 두 계층을 각자의 속도로 늘릴 수 있고, 파서가 있는 사이트라면 어떤 수집 경로로 들어온 URL이든 동일하게 처리됩니다.
 
 Collector 단계에서 사이트마다 렌더링 방식이 달라 수집 전략을 분리했습니다. **원티드는 JS 렌더링 SPA라 Playwright로 브라우저를 띄워 스크롤 lazy-load까지 유발한 뒤 렌더된 DOM에서 URL을 추출**하고, **잡코리아는 SSR이라 requests 한 번으로 충분**합니다. Collector는 수집 방식과 무관하게 동일한 형식의 fetch job 메시지를 발행하므로, Worker는 URL이 어떻게 수집됐는지 알 필요가 없습니다. 참고로 **공고 상세 페이지는 어느 사이트든 requests 한 번**으로 받습니다 — SEO 때문에 상세 페이지는 SSR로 내려오기 때문입니다.
 
