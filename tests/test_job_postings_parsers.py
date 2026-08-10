@@ -234,6 +234,116 @@ class TestJsonLdExtraction:
         assert worker.extract_jobposting_json_ld(build_html(json_ld=ld)) is None
 
 
+class TestJoinLdValues:
+    """JSON-LD 필드가 문자열/배열 양쪽으로 오는 것을 흡수하는 공통 헬퍼."""
+
+    def test_should_return_string_value_as_is(self):
+        assert worker.join_ld_values("FULL_TIME") == "FULL_TIME"
+
+    def test_should_join_list_with_comma(self):
+        assert worker.join_ld_values(["FULL_TIME", "CONTRACT"]) == "FULL_TIME, CONTRACT"
+
+    def test_should_drop_falsy_items_from_list(self):
+        assert worker.join_ld_values(["FULL_TIME", None, "", 0]) == "FULL_TIME"
+
+    def test_should_stringify_non_string_scalar(self):
+        assert worker.join_ld_values(3) == "3"
+
+    @pytest.mark.parametrize("value", [None, "", 0])
+    def test_should_return_none_for_falsy_scalar(self, value):
+        assert worker.join_ld_values(value) is None
+
+    def test_should_return_empty_string_for_empty_list(self):
+        """빈 배열은 리팩터링 이전과 동일하게 빈 문자열을 낸다 (None 이 아님)."""
+        assert worker.join_ld_values([]) == ""
+
+
+class TestExtractLdLocation:
+    """jobLocation 이 dict / 배열 어느 쪽으로 와도 같은 결과를 내야 한다."""
+
+    @pytest.mark.parametrize(
+        "region, locality, expected",
+        [
+            ("서울", "강남구", "서울 강남구"),
+            ("서울", "서울", "서울"),
+            ("부산", None, "부산"),
+            (None, "판교", "판교"),
+            (None, None, None),
+        ],
+    )
+    def test_should_resolve_region_and_locality(self, region, locality, expected):
+        address = {}
+        if region is not None:
+            address["addressRegion"] = region
+        if locality is not None:
+            address["addressLocality"] = locality
+
+        assert worker.extract_ld_location({"address": address}) == expected
+
+    def test_should_use_first_entry_when_given_a_list(self):
+        job_location = [
+            {"address": {"addressRegion": "서울", "addressLocality": "강남구"}},
+            {"address": {"addressRegion": "부산", "addressLocality": "해운대구"}},
+        ]
+
+        assert worker.extract_ld_location(job_location) == "서울 강남구"
+
+    def test_dict_and_single_item_list_should_agree(self):
+        """같은 주소면 표현 형태와 무관하게 같은 값이 나와야 한다."""
+        place = {"address": {"addressRegion": "서울", "addressLocality": "강남구"}}
+
+        assert worker.extract_ld_location(place) == worker.extract_ld_location([place])
+
+    @pytest.mark.parametrize(
+        "job_location",
+        [None, [], "서울", 123, {"address": "서울"}, {"address": None}, [None], ["서울"]],
+    )
+    def test_should_return_none_for_unusable_shapes(self, job_location):
+        assert worker.extract_ld_location(job_location) is None
+
+
+class TestExtractFromJobpostingLd:
+    """공통 추출기는 값만 만들어 돌려주고, 무엇을 쓸지는 각 파서가 고른다."""
+
+    def test_should_return_expected_keys(self):
+        result = worker.extract_from_jobposting_ld(make_jobposting_ld())
+
+        assert set(result.keys()) == {
+            "company_name",
+            "title",
+            "location",
+            "employment_type",
+            "experience_level",
+            "description",
+        }
+
+    def test_should_extract_all_values(self):
+        result = worker.extract_from_jobposting_ld(make_jobposting_ld())
+
+        assert result["company_name"] == "테스트컴퍼니"
+        assert result["title"] == "백엔드 개발자"
+        assert result["location"] == "서울 강남구"
+        assert result["employment_type"] == "FULL_TIME"
+        assert result["experience_level"] == "경력 3년 이상"
+
+    def test_should_return_description_unprocessed(self):
+        """정제 방식이 사이트마다 달라 원문 그대로 넘긴다 (태그 제거하지 않음)."""
+        ld = make_jobposting_ld(description="<p>주요 업무</p>")
+
+        assert worker.extract_from_jobposting_ld(ld)["description"] == "<p>주요 업무</p>"
+
+    def test_should_return_none_values_for_empty_jobposting(self):
+        result = worker.extract_from_jobposting_ld({})
+
+        assert all(value is None for value in result.values())
+
+    @pytest.mark.parametrize("org", [None, "테스트컴퍼니", 123, []])
+    def test_should_survive_non_dict_hiring_organization(self, org):
+        result = worker.extract_from_jobposting_ld({"hiringOrganization": org})
+
+        assert result["company_name"] is None
+
+
 class TestWantedParser:
     def test_should_prefer_json_ld_over_title_tag(self):
         html = build_html(
@@ -265,6 +375,14 @@ class TestWantedParser:
         html = build_html(json_ld=make_jobposting_ld(region=None, locality="판교"))
 
         assert worker.extract_wanted_fields(html)["location"] == "판교"
+
+    def test_should_also_read_job_location_from_list(self):
+        """B 리팩터링에서 넓어진 동작 — 이전에는 dict만 처리했다."""
+        html = build_html(
+            json_ld=make_jobposting_ld(region="서울", locality="강남구", location_as_list=True)
+        )
+
+        assert worker.extract_wanted_fields(html)["location"] == "서울 강남구"
 
     def test_should_join_employment_type_list_with_comma(self):
         html = build_html(json_ld=make_jobposting_ld(employment_type=["FULL_TIME", "CONTRACT"]))
@@ -511,11 +629,16 @@ class TestCatchParser:
 
         assert worker.extract_catch_fields(html)["location"] == "서울 종로구"
 
-    def test_should_not_read_job_location_when_given_as_dict(self):
-        """알려진 한계: 배열만 처리하므로 dict로 오면 조용히 놓친다."""
-        html = build_html(json_ld=make_jobposting_ld(location_as_list=False))
+    def test_should_also_read_job_location_from_dict(self):
+        """공통 함수가 dict/배열을 모두 흡수하므로 dict로 와도 읽는다.
 
-        assert worker.extract_catch_fields(html)["location"] is None
+        B 리팩터링에서 의도적으로 바꾼 동작이다. 이전에는 배열만 처리해
+        dict로 오면 조용히 None 이 됐다. None 이 값으로 바뀌는 방향뿐이라
+        기존에 맞던 값이 틀려질 여지는 없다.
+        """
+        html = build_html(json_ld=make_jobposting_ld(region="서울", locality="강남구"))
+
+        assert worker.extract_catch_fields(html)["location"] == "서울 강남구"
 
     def test_should_parse_pipe_separated_meta_description_by_index(self):
         """캐치 meta description은 '|' 구분자의 위치로 필드를 결정한다."""
