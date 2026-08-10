@@ -568,19 +568,37 @@ def extract_jobkorea_fields(html: str) -> dict:
     return result
 
 
-def extract_fields_by_domain(url: str, html: str) -> dict:
+# 사이트 하나 = 정의 하나. 파서 선택과 fetch 예외를 여기서만 관리한다.
+# 새 사이트 추가는 이 표에 한 줄 넣는 것으로 끝난다.
+DOMAIN_CONFIG: Dict[str, dict] = {
+    "wanted.co.kr": {"parser": extract_wanted_fields},
+    "saramin.co.kr": {
+        "parser": extract_saramin_fields,
+        # 인증서 체인이 불완전해 검증을 끈다.
+        "disable_ssl_verify": True,
+        # 목록에서 얻은 URL이 리다이렉트용이라 canonical 로 한 번 더 받는다.
+        "refetch_canonical": True,
+    },
+    "groupby.kr": {"parser": extract_groupby_fields},
+    "jobkorea.co.kr": {"parser": extract_jobkorea_fields},
+    "catch.co.kr": {"parser": extract_catch_fields},
+}
+
+
+def find_domain_config(url: str) -> dict:
+    """URL 의 hostname 에 해당하는 설정을 찾는다. 모르는 사이트면 빈 dict."""
     hostname = urlparse(url).netloc.lower()
 
-    if "wanted.co.kr" in hostname:
-        return extract_wanted_fields(html)
-    if "saramin.co.kr" in hostname:
-        return extract_saramin_fields(html)
-    if "groupby.kr" in hostname:
-        return extract_groupby_fields(html)
-    if "jobkorea.co.kr" in hostname:
-        return extract_jobkorea_fields(html)
-    if "catch.co.kr" in hostname:
-        return extract_catch_fields(html)
+    for domain, config in DOMAIN_CONFIG.items():
+        if domain in hostname:
+            return config
+    return {}
+
+
+def extract_fields_by_domain(url: str, html: str) -> dict:
+    parser = find_domain_config(url).get("parser")
+    if parser:
+        return parser(html)
 
     title_tag = extract_title_tag(html)
     og_title = extract_meta_content(html, property_name="og:title")
@@ -621,9 +639,13 @@ def build_processed_document(job: dict, s3_paths: dict, html: str) -> dict:
     }
 
 
-def refetch_saramin_with_canonical(session: requests.Session, url: str, html: str, timeout: tuple[int, int] = (3, 10),) -> str:
-    hostname = urlparse(url).netloc.lower()
-    if "saramin.co.kr" not in hostname:
+def refetch_canonical_url(session: requests.Session, url: str, html: str, timeout: tuple[int, int] = (3, 10),) -> str:
+    """설정에 refetch_canonical 이 켜진 사이트는 canonical URL 로 한 번 더 받는다.
+
+    목록에서 얻은 URL 이 리다이렉트용이라 실제 공고 페이지가 아닌 경우를 위한 것이다.
+    재요청은 어디까지나 보너스라 실패하면 원래 html 을 그대로 돌려준다 (DLQ 로 보내지 않음).
+    """
+    if not find_domain_config(url).get("refetch_canonical"):
         return html
 
     canonical_url = extract_canonical_url(html)
@@ -643,10 +665,10 @@ def refetch_saramin_with_canonical(session: requests.Session, url: str, html: st
             verify=verify,
         )
         response.raise_for_status()
-        print(f"[worker] refetched saramin canonical url: {canonical_url}")
+        print(f"[worker] refetched canonical url: {canonical_url}")
         return response.text
     except Exception as e:
-        print(f"[worker] failed to refetch saramin canonical url: {e}")
+        print(f"[worker] failed to refetch canonical url: {e}")
         return html
 
 
@@ -723,11 +745,7 @@ def create_http_session() -> requests.Session:
     return session
 
 def should_disable_ssl_verify(url: str) -> bool:
-    hostname = urlparse(url).netloc.lower()
-
-    if "saramin.co.kr" in hostname:
-        return True
-    return False
+    return bool(find_domain_config(url).get("disable_ssl_verify", False))
 
 def classify_fetch_error(error: Exception) -> str:
     if isinstance(error, requests.exceptions.ConnectTimeout):
@@ -804,7 +822,7 @@ def main():
 
             try:
                 html = fetch_html(http_session, job["url"])
-                html = refetch_saramin_with_canonical(http_session, job["url"], html)
+                html = refetch_canonical_url(http_session, job["url"], html)
 
                 print(f"[worker] fetched html length={len(html)}")
             except Exception as e:

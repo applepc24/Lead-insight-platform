@@ -91,6 +91,17 @@ def make_jobposting_ld(
     return ld
 
 
+class RecordingSession:
+    """재요청이 실제로 일어났는지 기록하는 세션 스텁."""
+
+    def __init__(self):
+        self.calls = []
+
+    def get(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        raise RuntimeError("이 테스트에서는 네트워크 요청이 일어나면 안 된다")
+
+
 ALL_PARSERS = [
     worker.extract_wanted_fields,
     worker.extract_groupby_fields,
@@ -800,18 +811,13 @@ class TestExtractFieldsByDomain:
             ("https://www.catch.co.kr/NCS/RecruitInfoDetails/123", "extract_catch_fields"),
         ],
     )
-    def test_should_route_url_to_matching_domain_parser(self, url, expected_parser, monkeypatch):
-        called = {}
+    def test_should_route_url_to_matching_domain_parser(self, url, expected_parser):
+        """DOMAIN_CONFIG 는 import 시점에 함수 객체를 잡으므로 표를 직접 검증한다.
 
-        def spy(*_args):
-            called["hit"] = True
-            return {field: None for field in CONTRACT_FIELDS}
-
-        monkeypatch.setattr(worker, expected_parser, spy)
-
-        worker.extract_fields_by_domain(url, build_html(title="아무거나"))
-
-        assert called.get("hit") is True
+        모듈 속성을 monkeypatch 해도 표에 담긴 참조는 바뀌지 않는다 — 설정 테이블
+        방식의 당연한 귀결이라, 라우팅은 표가 맞는지로 확인하는 편이 직접적이다.
+        """
+        assert worker.find_domain_config(url)["parser"] is getattr(worker, expected_parser)
 
     def test_should_route_by_hostname_regardless_of_case(self):
         html = build_html(og_title="[대문자컴퍼니] 백엔드 개발자 | 캐치")
@@ -865,6 +871,110 @@ class TestExtractFieldsByDomain:
         )
 
         assert set(result.keys()) == CONTRACT_FIELDS
+
+
+class TestDomainConfig:
+    """사이트 하나 = 정의 하나. 파서 선택과 fetch 예외를 한 표에서 관리한다."""
+
+    def test_every_entry_should_declare_a_parser(self):
+        for domain, config in worker.DOMAIN_CONFIG.items():
+            assert callable(config.get("parser")), f"{domain} 에 parser 가 없다"
+
+    def test_every_parser_should_be_used_exactly_once(self):
+        """파서 5종이 모두 표에 등록돼 있고 중복 등록되지 않아야 한다."""
+        registered = [config["parser"] for config in worker.DOMAIN_CONFIG.values()]
+
+        assert sorted(f.__name__ for f in registered) == sorted(f.__name__ for f in ALL_PARSERS)
+
+    def test_should_return_empty_config_for_unknown_domain(self):
+        assert worker.find_domain_config("https://unknown-job-site.com/posting/1") == {}
+
+    def test_should_match_subdomains(self):
+        config = worker.find_domain_config("https://m.wanted.co.kr/wd/1")
+
+        assert config["parser"] is worker.extract_wanted_fields
+
+    def test_should_ignore_path_when_matching(self):
+        """hostname 만 보므로 경로에 다른 사이트 이름이 있어도 영향받지 않는다."""
+        config = worker.find_domain_config("https://www.catch.co.kr/go?to=wanted.co.kr")
+
+        assert config["parser"] is worker.extract_catch_fields
+
+    def test_saramin_should_declare_both_fetch_exceptions(self):
+        """사람인의 특수 처리가 전부 한 곳에 모여 있어야 한다."""
+        config = worker.DOMAIN_CONFIG["saramin.co.kr"]
+
+        assert config["disable_ssl_verify"] is True
+        assert config["refetch_canonical"] is True
+
+    @pytest.mark.parametrize(
+        "domain",
+        [d for d in ["wanted.co.kr", "groupby.kr", "jobkorea.co.kr", "catch.co.kr"]],
+    )
+    def test_other_domains_should_declare_no_fetch_exception(self, domain):
+        config = worker.DOMAIN_CONFIG[domain]
+
+        assert config.get("disable_ssl_verify", False) is False
+        assert config.get("refetch_canonical", False) is False
+
+
+class TestSslPolicyFromConfig:
+    @pytest.mark.parametrize(
+        "url, expected",
+        [
+            ("https://www.saramin.co.kr/zf_user/jobs/view", True),
+            ("https://www.wanted.co.kr/wd/242151", False),
+            ("https://unknown-job-site.com/posting/1", False),
+        ],
+    )
+    def test_should_read_ssl_policy_from_domain_config(self, url, expected):
+        assert worker.should_disable_ssl_verify(url) is expected
+
+    def test_should_follow_config_when_flag_is_flipped(self, monkeypatch):
+        """설정 한 곳만 바꾸면 정책이 따라가야 한다 — C의 목적을 직접 검증."""
+        patched = dict(worker.DOMAIN_CONFIG)
+        patched["wanted.co.kr"] = {**patched["wanted.co.kr"], "disable_ssl_verify": True}
+        monkeypatch.setattr(worker, "DOMAIN_CONFIG", patched)
+
+        assert worker.should_disable_ssl_verify("https://www.wanted.co.kr/wd/1") is True
+
+
+class TestRefetchCanonicalFromConfig:
+    def test_should_skip_refetch_when_domain_not_configured(self):
+        """canonical 링크가 있어도 설정이 없으면 요청 자체를 하지 않아야 한다.
+
+        refetch 는 실패해도 원본 html 을 돌려주므로 반환값만으로는
+        "건너뛴 것"과 "요청했다 실패한 것"이 구분되지 않는다. 호출 여부를 본다.
+        """
+        session = RecordingSession()
+        html = '<html><head><link rel="canonical" href="https://other.com/1"></head></html>'
+
+        result = worker.refetch_canonical_url(session, "https://www.wanted.co.kr/wd/1", html)
+
+        assert result is html
+        assert session.calls == []
+
+    def test_should_follow_config_when_flag_is_flipped(self, monkeypatch):
+        """wanted 에 refetch_canonical 을 켜면 설정만으로 재요청이 켜져야 한다."""
+        patched = dict(worker.DOMAIN_CONFIG)
+        patched["wanted.co.kr"] = {**patched["wanted.co.kr"], "refetch_canonical": True}
+        monkeypatch.setattr(worker, "DOMAIN_CONFIG", patched)
+
+        class FakeResponse:
+            text = "<html>canonical 페이지</html>"
+
+            def raise_for_status(self):
+                return None
+
+        class FakeSession:
+            def get(self, *_args, **_kwargs):
+                return FakeResponse()
+
+        html = '<html><head><link rel="canonical" href="https://www.wanted.co.kr/wd/999"></head></html>'
+
+        result = worker.refetch_canonical_url(FakeSession(), "https://www.wanted.co.kr/wd/1", html)
+
+        assert result == "<html>canonical 페이지</html>"
 
 
 class TestMetaExtractionHelpers:

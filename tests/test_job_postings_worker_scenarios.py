@@ -134,7 +134,7 @@ class TestWorkerScenarios:
         monkeypatch.setattr(worker, "fetch_html", lambda session, url: "<html>ok</html>")
         monkeypatch.setattr(
             worker,
-            "refetch_saramin_with_canonical",
+            "refetch_canonical_url",
             lambda session, url, html: html,
         )
 
@@ -310,7 +310,7 @@ class TestWorkerScenarios:
         monkeypatch.setattr(worker, "fetch_html", lambda session, url: "<html>ok</html>")
         monkeypatch.setattr(
             worker,
-            "refetch_saramin_with_canonical",
+            "refetch_canonical_url",
             lambda session, url, html: html,
         )
 
