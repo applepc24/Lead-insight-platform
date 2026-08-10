@@ -252,45 +252,65 @@ class TestFetchPolicy:
             worker.fetch_html(FakeSession(), "https://example.com")
 
 
+class RecordingSession:
+    """재요청이 실제로 일어났는지 기록하는 세션 스텁.
+
+    refetch 는 실패하면 원본 html 을 돌려주므로, 반환값만 보면 "요청을 건너뛴 것"과
+    "요청했다가 실패한 것"이 구분되지 않는다. 호출 자체를 기록해야 조기 반환을 검증할 수 있다.
+    """
+
+    def __init__(self):
+        self.calls = []
+
+    def get(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        raise RuntimeError("이 테스트에서는 네트워크 요청이 일어나면 안 된다")
+
+
 class TestCanonicalRefetchPolicy:
-    def test_refetch_saramin_with_canonical_should_return_original_html_when_not_saramin(self):
-        session = object()
+    def test_refetch_canonical_url_should_return_original_html_when_domain_not_configured(self):
+        session = RecordingSession()
         original_html = "<html>original</html>"
 
-        result = worker.refetch_saramin_with_canonical(
+        result = worker.refetch_canonical_url(
             session=session,
             url="https://www.wanted.co.kr/wd/242151",
             html=original_html,
         )
 
         assert result == original_html
+        assert session.calls == []
 
-    def test_refetch_saramin_with_canonical_should_return_original_html_when_canonical_missing(self, monkeypatch):
+    def test_refetch_canonical_url_should_return_original_html_when_canonical_missing(self, monkeypatch):
+        session = RecordingSession()
         original_html = "<html>no canonical</html>"
         monkeypatch.setattr(worker, "extract_canonical_url", lambda html: None)
 
-        result = worker.refetch_saramin_with_canonical(
-            session=object(),
+        result = worker.refetch_canonical_url(
+            session=session,
             url="https://www.saramin.co.kr/zf_user/jobs/view",
             html=original_html,
         )
 
         assert result == original_html
+        assert session.calls == []
 
-    def test_refetch_saramin_with_canonical_should_return_original_html_when_canonical_same_as_url(self, monkeypatch):
+    def test_refetch_canonical_url_should_return_original_html_when_canonical_same_as_url(self, monkeypatch):
+        session = RecordingSession()
         original_html = "<html>same canonical</html>"
         url = "https://www.saramin.co.kr/zf_user/jobs/view"
         monkeypatch.setattr(worker, "extract_canonical_url", lambda html: url)
 
-        result = worker.refetch_saramin_with_canonical(
-            session=object(),
+        result = worker.refetch_canonical_url(
+            session=session,
             url=url,
             html=original_html,
         )
 
         assert result == original_html
+        assert session.calls == []
 
-    def test_refetch_saramin_with_canonical_should_fetch_canonical_and_return_new_html(self, monkeypatch):
+    def test_refetch_canonical_url_should_fetch_canonical_and_return_new_html(self, monkeypatch):
         canonical_url = "https://www.saramin.co.kr/zf_user/jobs/relay/view?rec_idx=123"
         monkeypatch.setattr(worker, "extract_canonical_url", lambda html: canonical_url)
 
@@ -311,7 +331,7 @@ class TestCanonicalRefetchPolicy:
 
                 return FakeResponse()
 
-        result = worker.refetch_saramin_with_canonical(
+        result = worker.refetch_canonical_url(
             session=FakeSession(),
             url="https://www.saramin.co.kr/zf_user/jobs/view",
             html="<html>old html</html>",
@@ -322,7 +342,7 @@ class TestCanonicalRefetchPolicy:
         assert captured["timeout"] == (3, 10)
         assert captured["verify"] is False
 
-    def test_refetch_saramin_with_canonical_should_fallback_to_original_html_on_refetch_failure(self, monkeypatch):
+    def test_refetch_canonical_url_should_fallback_to_original_html_on_refetch_failure(self, monkeypatch):
         canonical_url = "https://www.saramin.co.kr/zf_user/jobs/relay/view?rec_idx=123"
         monkeypatch.setattr(worker, "extract_canonical_url", lambda html: canonical_url)
 
@@ -332,7 +352,7 @@ class TestCanonicalRefetchPolicy:
 
         original_html = "<html>old html</html>"
 
-        result = worker.refetch_saramin_with_canonical(
+        result = worker.refetch_canonical_url(
             session=FakeSession(),
             url="https://www.saramin.co.kr/zf_user/jobs/view",
             html=original_html,

@@ -289,6 +289,61 @@ def clean_catch_title(title: Optional[str]) -> Tuple[Optional[str], Optional[str
     return normalize_whitespace(company), normalize_whitespace(title)
 
 
+def join_ld_values(value) -> Optional[str]:
+    """JSON-LD 필드는 문자열일 수도 배열일 수도 있어 둘 다 받는다.
+
+    배열이면 falsy 원소를 걸러 콤마로 잇는다 ("FULL_TIME, , CONTRACT" 방지).
+    """
+    if isinstance(value, list):
+        return ", ".join([str(x) for x in value if x])
+    if value:
+        return str(value)
+    return None
+
+
+def extract_ld_location(job_location) -> Optional[str]:
+    """jobLocation 에서 지역 문자열을 만든다.
+
+    사이트마다 dict / 배열로 갈리므로(catch는 배열, 나머지는 dict) 둘 다 받고,
+    배열이면 첫 근무지를 쓴다.
+    """
+    if isinstance(job_location, list):
+        job_location = job_location[0] if job_location else None
+
+    if not isinstance(job_location, dict):
+        return None
+
+    address = job_location.get("address") or {}
+    if not isinstance(address, dict):
+        return None
+
+    region = normalize_whitespace(address.get("addressRegion"))
+    locality = normalize_whitespace(address.get("addressLocality"))
+
+    if region and locality and region != locality:
+        return f"{region} {locality}"
+    return region or locality
+
+
+def extract_from_jobposting_ld(jobposting: dict) -> dict:
+    """JSON-LD JobPosting 에서 공통 필드를 뽑는다.
+
+    사이트마다 읽는 필드가 다르고 description 정제 방식도 갈리므로,
+    여기서는 값만 만들어 돌려주고 무엇을 쓸지는 각 파서가 고른다.
+    description 은 정제하지 않은 원문 그대로 준다.
+    """
+    org = jobposting.get("hiringOrganization") or {}
+
+    return {
+        "company_name": normalize_whitespace(org.get("name")) if isinstance(org, dict) else None,
+        "title": normalize_whitespace(jobposting.get("title")),
+        "location": extract_ld_location(jobposting.get("jobLocation")),
+        "employment_type": join_ld_values(jobposting.get("employmentType")),
+        "experience_level": join_ld_values(jobposting.get("experienceRequirements")),
+        "description": jobposting.get("description"),
+    }
+
+
 def extract_wanted_fields(html: str) -> dict:
     result = {
         "company_name": None,
@@ -301,40 +356,16 @@ def extract_wanted_fields(html: str) -> dict:
 
     jobposting = extract_jobposting_json_ld(html)
     if jobposting:
-        result["title"] = normalize_whitespace(jobposting.get("title"))
+        ld = extract_from_jobposting_ld(jobposting)
+        result["title"] = ld["title"]
+        result["company_name"] = ld["company_name"]
+        result["location"] = ld["location"]
+        result["employment_type"] = ld["employment_type"]
+        result["experience_level"] = ld["experience_level"]
 
-        org = jobposting.get("hiringOrganization") or {}
-        if isinstance(org, dict):
-            result["company_name"] = normalize_whitespace(org.get("name"))
-
-        location = None
-        job_location = jobposting.get("jobLocation") or {}
-        if isinstance(job_location, dict):
-            address = job_location.get("address") or {}
-            if isinstance(address, dict):
-                region = normalize_whitespace(address.get("addressRegion"))
-                locality = normalize_whitespace(address.get("addressLocality"))
-                if region and locality and region != locality:
-                    location = f"{region} {locality}"
-                else:
-                    location = region or locality
-        result["location"] = location
-
-        emp = jobposting.get("employmentType")
-        if isinstance(emp, list):
-            result["employment_type"] = ", ".join([str(x) for x in emp if x])
-        elif emp:
-            result["employment_type"] = str(emp)
-
-        exp = jobposting.get("experienceRequirements")
-        if isinstance(exp, list):
-            result["experience_level"] = ", ".join([str(x) for x in exp if x])
-        elif exp:
-            result["experience_level"] = str(exp)
-
-        desc = jobposting.get("description")
-        if desc:
-            result["description_text"] = strip_html_tags(desc)
+        # 원티드의 description 은 HTML 조각이라 태그를 제거한다.
+        if ld["description"]:
+            result["description_text"] = strip_html_tags(ld["description"])
 
     if not result["title"] or not result["company_name"]:
         title_tag = extract_title_tag(html)
@@ -361,32 +392,15 @@ def extract_groupby_fields(html: str) -> dict:
 
     jobposting = extract_jobposting_json_ld(html)
     if jobposting:
-        result["title"] = normalize_whitespace(jobposting.get("title"))
+        ld = extract_from_jobposting_ld(jobposting)
+        result["title"] = ld["title"]
+        result["company_name"] = ld["company_name"]
+        result["location"] = ld["location"]
+        result["employment_type"] = ld["employment_type"]
+        # experience_level 은 JSON-LD 대신 title 태그에서 뽑는다 (아래 참고).
 
-        org = jobposting.get("hiringOrganization") or {}
-        if isinstance(org, dict):
-            result["company_name"] = normalize_whitespace(org.get("name"))
-
-        job_location = jobposting.get("jobLocation") or {}
-        if isinstance(job_location, dict):
-            address = job_location.get("address") or {}
-            if isinstance(address, dict):
-                region = normalize_whitespace(address.get("addressRegion"))
-                locality = normalize_whitespace(address.get("addressLocality"))
-                if region and locality and region != locality:
-                    result["location"] = f"{region} {locality}"
-                else:
-                    result["location"] = region or locality
-
-        emp = jobposting.get("employmentType")
-        if isinstance(emp, list):
-            result["employment_type"] = ", ".join([str(x) for x in emp if x])
-        elif emp:
-            result["employment_type"] = str(emp)
-
-        desc = jobposting.get("description")
-        if desc:
-            result["description_text"] = strip_html_tags(desc)
+        if ld["description"]:
+            result["description_text"] = strip_html_tags(ld["description"])
 
     title_tag = extract_title_tag(html)
     og_title = extract_meta_content(html, property_name="og:title")
@@ -451,40 +465,16 @@ def extract_catch_fields(html: str) -> dict:
 
     jobposting = extract_jobposting_json_ld(html)
     if jobposting:
-        result["title"] = normalize_whitespace(jobposting.get("title"))
+        ld = extract_from_jobposting_ld(jobposting)
+        result["title"] = ld["title"]
+        result["company_name"] = ld["company_name"]
+        result["location"] = ld["location"]
+        result["employment_type"] = ld["employment_type"]
+        result["experience_level"] = ld["experience_level"]
 
-        org = jobposting.get("hiringOrganization") or {}
-        if isinstance(org, dict):
-            result["company_name"] = normalize_whitespace(org.get("name"))
-
-        job_location = jobposting.get("jobLocation")
-        if isinstance(job_location, list) and job_location:
-            first_location = job_location[0]
-            if isinstance(first_location, dict):
-                address = first_location.get("address") or {}
-                if isinstance(address, dict):
-                    region = normalize_whitespace(address.get("addressRegion"))
-                    locality = normalize_whitespace(address.get("addressLocality"))
-                    if region and locality and region != locality:
-                        result["location"] = f"{region} {locality}"
-                    else:
-                        result["location"] = region or locality
-
-        emp = jobposting.get("employmentType")
-        if isinstance(emp, list):
-            result["employment_type"] = ", ".join([str(x) for x in emp if x])
-        elif emp:
-            result["employment_type"] = str(emp)
-
-        exp = jobposting.get("experienceRequirements")
-        if isinstance(exp, list):
-            result["experience_level"] = ", ".join([str(x) for x in exp if x])
-        elif exp:
-            result["experience_level"] = str(exp)
-
-        desc = jobposting.get("description")
-        if desc:
-            result["description_text"] = normalize_whitespace(desc)
+        # 캐치의 description 은 평문이라 공백만 정리한다.
+        if ld["description"]:
+            result["description_text"] = normalize_whitespace(ld["description"])
 
     title_tag = extract_title_tag(html)
     og_title = extract_meta_content(html, property_name="og:title")
@@ -533,32 +523,16 @@ def extract_jobkorea_fields(html: str) -> dict:
 
     jobposting = extract_jobposting_json_ld(html)
     if jobposting:
-        result["title"] = normalize_whitespace(jobposting.get("title"))
+        ld = extract_from_jobposting_ld(jobposting)
+        result["title"] = ld["title"]
+        result["company_name"] = ld["company_name"]
+        result["location"] = ld["location"]
+        result["experience_level"] = ld["experience_level"]
+        # employment_type 은 잡코리아 JSON-LD 에 없어 쓰지 않는다.
 
-        org = jobposting.get("hiringOrganization") or {}
-        if isinstance(org, dict):
-            result["company_name"] = normalize_whitespace(org.get("name"))
-
-        job_location = jobposting.get("jobLocation") or {}
-        if isinstance(job_location, dict):
-            address = job_location.get("address") or {}
-            if isinstance(address, dict):
-                locality = normalize_whitespace(address.get("addressLocality"))
-                region = normalize_whitespace(address.get("addressRegion"))
-                if region and locality and region != locality:
-                    result["location"] = f"{region} {locality}"
-                else:
-                    result["location"] = locality or region
-
-        exp = jobposting.get("experienceRequirements")
-        if isinstance(exp, list):
-            result["experience_level"] = ", ".join([str(x) for x in exp if x])
-        elif exp:
-            result["experience_level"] = str(exp)
-
-        desc = jobposting.get("description")
-        if desc:
-            result["description_text"] = normalize_whitespace(desc)
+        # 잡코리아의 description 은 평문이라 공백만 정리한다.
+        if ld["description"]:
+            result["description_text"] = normalize_whitespace(ld["description"])
 
     title_tag = extract_title_tag(html)
     og_title = extract_meta_content(html, property_name="og:title")
@@ -594,19 +568,37 @@ def extract_jobkorea_fields(html: str) -> dict:
     return result
 
 
-def extract_fields_by_domain(url: str, html: str) -> dict:
+# 사이트 하나 = 정의 하나. 파서 선택과 fetch 예외를 여기서만 관리한다.
+# 새 사이트 추가는 이 표에 한 줄 넣는 것으로 끝난다.
+DOMAIN_CONFIG: Dict[str, dict] = {
+    "wanted.co.kr": {"parser": extract_wanted_fields},
+    "saramin.co.kr": {
+        "parser": extract_saramin_fields,
+        # 인증서 체인이 불완전해 검증을 끈다.
+        "disable_ssl_verify": True,
+        # 목록에서 얻은 URL이 리다이렉트용이라 canonical 로 한 번 더 받는다.
+        "refetch_canonical": True,
+    },
+    "groupby.kr": {"parser": extract_groupby_fields},
+    "jobkorea.co.kr": {"parser": extract_jobkorea_fields},
+    "catch.co.kr": {"parser": extract_catch_fields},
+}
+
+
+def find_domain_config(url: str) -> dict:
+    """URL 의 hostname 에 해당하는 설정을 찾는다. 모르는 사이트면 빈 dict."""
     hostname = urlparse(url).netloc.lower()
 
-    if "wanted.co.kr" in hostname:
-        return extract_wanted_fields(html)
-    if "saramin.co.kr" in hostname:
-        return extract_saramin_fields(html)
-    if "groupby.kr" in hostname:
-        return extract_groupby_fields(html)
-    if "jobkorea.co.kr" in hostname:
-        return extract_jobkorea_fields(html)
-    if "catch.co.kr" in hostname:
-        return extract_catch_fields(html)
+    for domain, config in DOMAIN_CONFIG.items():
+        if domain in hostname:
+            return config
+    return {}
+
+
+def extract_fields_by_domain(url: str, html: str) -> dict:
+    parser = find_domain_config(url).get("parser")
+    if parser:
+        return parser(html)
 
     title_tag = extract_title_tag(html)
     og_title = extract_meta_content(html, property_name="og:title")
@@ -647,9 +639,13 @@ def build_processed_document(job: dict, s3_paths: dict, html: str) -> dict:
     }
 
 
-def refetch_saramin_with_canonical(session: requests.Session, url: str, html: str, timeout: tuple[int, int] = (3, 10),) -> str:
-    hostname = urlparse(url).netloc.lower()
-    if "saramin.co.kr" not in hostname:
+def refetch_canonical_url(session: requests.Session, url: str, html: str, timeout: tuple[int, int] = (3, 10),) -> str:
+    """설정에 refetch_canonical 이 켜진 사이트는 canonical URL 로 한 번 더 받는다.
+
+    목록에서 얻은 URL 이 리다이렉트용이라 실제 공고 페이지가 아닌 경우를 위한 것이다.
+    재요청은 어디까지나 보너스라 실패하면 원래 html 을 그대로 돌려준다 (DLQ 로 보내지 않음).
+    """
+    if not find_domain_config(url).get("refetch_canonical"):
         return html
 
     canonical_url = extract_canonical_url(html)
@@ -669,10 +665,10 @@ def refetch_saramin_with_canonical(session: requests.Session, url: str, html: st
             verify=verify,
         )
         response.raise_for_status()
-        print(f"[worker] refetched saramin canonical url: {canonical_url}")
+        print(f"[worker] refetched canonical url: {canonical_url}")
         return response.text
     except Exception as e:
-        print(f"[worker] failed to refetch saramin canonical url: {e}")
+        print(f"[worker] failed to refetch canonical url: {e}")
         return html
 
 
@@ -749,11 +745,7 @@ def create_http_session() -> requests.Session:
     return session
 
 def should_disable_ssl_verify(url: str) -> bool:
-    hostname = urlparse(url).netloc.lower()
-
-    if "saramin.co.kr" in hostname:
-        return True
-    return False
+    return bool(find_domain_config(url).get("disable_ssl_verify", False))
 
 def classify_fetch_error(error: Exception) -> str:
     if isinstance(error, requests.exceptions.ConnectTimeout):
@@ -830,7 +822,7 @@ def main():
 
             try:
                 html = fetch_html(http_session, job["url"])
-                html = refetch_saramin_with_canonical(http_session, job["url"], html)
+                html = refetch_canonical_url(http_session, job["url"], html)
 
                 print(f"[worker] fetched html length={len(html)}")
             except Exception as e:
