@@ -148,7 +148,6 @@ S3 raw 저장 → BigQuery 적재 → 정제/집계 → 운영 모니터링까�
 ### 1. Collector — 렌더링 방식에 따른 수집 전략
 
 목록 페이지에서 상세 URL을 추출하는 단계로, 사이트 렌더링 방식에 따라 도구가 갈린다.
-**자동 Collector가 구현된 것은 아래 2개다.**
 
 | 대상 | 방식 | 이유 |
 |---|---|---|
@@ -162,9 +161,8 @@ Collector는 수집 방식과 무관하게 동일한 fetch job 메시지를 Kafk
 ```
 
 따라서 Worker는 URL이 어떤 방식으로 수집됐는지 알 필요가 없다.
-이 분리 덕분에 **Collector가 없는 사이트도 파서만 있으면 처리된다** — URL을 어떤 경로로
-넣든 Worker는 hostname만 보기 때문이다. GroupBy / Catch / Saramin이 현재 그 상태다
-(파서는 구현됨, 자동 Collector는 미구현).
+이 분리 덕분에 **Collector와 파서를 각자의 속도로 늘릴 수 있다** — 파서가 있는 사이트라면
+URL을 어떤 경로로 넣든 Worker는 hostname만 보고 동일하게 처리한다.
 
 참고로 **공고 상세 페이지 fetch는 사이트와 무관하게 requests 한 번**이다 (`fetch_html()`).
 Playwright는 목록 페이지 수집에만 쓴다 — 상세 페이지는 SEO 때문에 어차피 SSR로 내려온다.
