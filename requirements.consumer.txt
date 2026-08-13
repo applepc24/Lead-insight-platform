@@ -5,3 +5,4 @@ google-cloud-bigquery
 playwright
 requests
 urllib3
+beautifulsoup4

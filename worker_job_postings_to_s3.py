@@ -15,6 +15,7 @@ from html import unescape
 from typing import List, Optional, Tuple, Dict
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from bs4 import BeautifulSoup
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -102,10 +103,10 @@ def compute_content_hash(text: str) -> str:
 
 
 def extract_title_tag(html: str) -> Optional[str]:
-    match = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
-    if not match:
+    tag = BeautifulSoup(html, "html.parser").find("title")
+    if not tag:
         return None
-    return unescape(match.group(1)).strip()
+    return tag.get_text().strip()
 
 
 def extract_meta_content(
@@ -114,24 +115,23 @@ def extract_meta_content(
     property_name: Optional[str] = None,
 ) -> Optional[str]:
     if name:
-        pattern = rf'<meta[^>]+name=["\']{re.escape(name)}["\'][^>]+content=["\'](.*?)["\']'
+        attrs = {"name": name}
     elif property_name:
-        pattern = rf'<meta[^>]+property=["\']{re.escape(property_name)}["\'][^>]+content=["\'](.*?)["\']'
+        attrs = {"property": property_name}
     else:
         return None
 
-    match = re.search(pattern, html, re.IGNORECASE | re.DOTALL)
-    if not match:
+    tag = BeautifulSoup(html, "html.parser").find("meta", attrs=attrs)
+    if not tag or tag.get("content") is None:
         return None
-    return unescape(match.group(1)).strip()
+    return tag["content"].strip()
 
 
 def extract_json_ld_objects(html: str) -> List[Dict]:
-    matches = re.findall(
-        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
-        html,
-        re.IGNORECASE | re.DOTALL,
+    scripts = BeautifulSoup(html, "html.parser").find_all(
+        "script", attrs={"type": "application/ld+json"}
     )
+    matches = [script.get_text() for script in scripts]
 
     objects = []
     for raw in matches:
@@ -249,14 +249,10 @@ def parse_saramin_meta_description(desc: Optional[str]) -> dict:
 
 
 def extract_canonical_url(html: str) -> Optional[str]:
-    match = re.search(
-        r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\'](.*?)["\']',
-        html,
-        re.IGNORECASE | re.DOTALL,
-    )
-    if not match:
+    tag = BeautifulSoup(html, "html.parser").find("link", rel="canonical")
+    if not tag or not tag.get("href"):
         return None
-    return unescape(match.group(1)).strip()
+    return tag["href"].strip()
 
 
 def clean_jobkorea_title(title: Optional[str]) -> Optional[str]:

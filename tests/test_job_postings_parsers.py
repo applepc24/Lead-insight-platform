@@ -994,18 +994,59 @@ class TestMetaExtractionHelpers:
 
         assert worker.extract_title_tag(html) == "여러 줄\n  제목"
 
-    def test_should_return_none_when_title_tag_unclosed(self):
-        assert worker.extract_title_tag("<html><head><title>닫히지 않은") is None
+    def test_should_recover_title_when_tag_unclosed(self):
+        """파서는 브라우저처럼 닫히지 않은 태그를 문서 끝에서 복구한다.
 
-    def test_meta_extraction_fails_when_content_precedes_name_attribute(self):
-        """알려진 한계: 정규식이 name/property가 content보다 앞에 온다고 가정한다.
+        정규식 시절에는 </title> 를 못 찾아 None 이었다. 응답이 잘린 경우에도
+        제목을 살린다.
+        """
+        assert worker.extract_title_tag("<html><head><title>닫히지 않은") == "닫히지 않은"
 
-        속성 순서만 바꾼 유효한 HTML에서 값을 못 읽는다. HTML 파서로 교체하면
-        이 테스트는 뒤집혀야 한다 — 교체 여부를 판단할 근거로 남겨둔다.
+    def test_should_extract_meta_regardless_of_attribute_order(self):
+        """HTML 속성은 순서가 무의미하므로 파서도 순서를 따지지 않는다.
+
+        정규식 시절에는 name 이 content 보다 앞에 온다고 가정해 이 유효한 HTML 을
+        놓쳤다. 사이트가 마크업 순서만 바꿔도 조용히 None 이 되던 버그다.
         """
         html = '<html><head><meta content="설명입니다" name="description"></head></html>'
 
-        assert worker.extract_meta_content(html, name="description") is None
+        assert worker.extract_meta_content(html, name="description") == "설명입니다"
+
+    def test_should_extract_og_property_regardless_of_attribute_order(self):
+        """name 뿐 아니라 property 분기도 같은 순서 가정을 갖고 있었다."""
+        html = '<html><head><meta content="og 제목" property="og:title"></head></html>'
+
+        assert worker.extract_meta_content(html, property_name="og:title") == "og 제목"
+
+    def test_should_decode_entities_exactly_once(self):
+        """파서가 이미 디코딩하므로 unescape 를 덧붙이면 이중 디코딩이 된다.
+
+        &amp;lt; 는 '&lt;' 라는 글자를 뜻한다. 여기서 한 번 더 풀면 '<' 가 되어
+        원문과 다른 값이 저장된다. unescape 재도입을 막는 가드다.
+        """
+        html = '<html><head><meta name="description" content="&amp;lt;div&amp;gt; 태그"></head></html>'
+
+        assert worker.extract_meta_content(html, name="description") == "&lt;div&gt; 태그"
+
+    def test_should_distinguish_empty_content_from_missing_attribute(self):
+        """content="" 는 빈 문자열을, content 속성 자체가 없으면 None 을 돌려준다.
+
+        정규식 시절과 같은 동작이다. `if not tag.get("content")` 로 뭉뚱그리면
+        둘이 구분되지 않아, '사이트가 빈 값을 줬다'와 '태그 형태가 다르다'를
+        하류에서 갈라볼 수 없게 된다.
+        """
+        assert worker.extract_meta_content(
+            '<meta name="description" content="">', name="description"
+        ) == ""
+        assert worker.extract_meta_content(
+            '<meta name="description">', name="description"
+        ) is None
+
+    def test_should_strip_surrounding_whitespace_in_meta_content(self):
+        """속성값의 앞뒤 공백은 파서가 지워주지 않으므로 직접 벗긴다."""
+        html = '<meta name="description" content="  설명입니다  ">'
+
+        assert worker.extract_meta_content(html, name="description") == "설명입니다"
 
 
 class TestStripHtmlTags:
@@ -1050,3 +1091,43 @@ class TestExtractCanonicalUrl:
 
     def test_should_return_none_when_canonical_absent(self):
         assert worker.extract_canonical_url(build_html(title="제목")) is None
+
+    def test_should_extract_canonical_regardless_of_attribute_order(self):
+        """canonical 도 rel 이 href 보다 앞에 온다고 가정하던 같은 버그가 있었다.
+
+        사람인은 canonical 로 재요청하는 유일한 도메인이라, 이 값이 None 이 되면
+        리다이렉트 전 페이지를 그대로 파싱하게 된다.
+        """
+        html = (
+            '<html><head>'
+            '<link href="https://www.saramin.co.kr/x?a=1&amp;b=2" rel="canonical">'
+            '</head></html>'
+        )
+
+        assert worker.extract_canonical_url(html) == "https://www.saramin.co.kr/x?a=1&b=2"
+
+    def test_should_ignore_link_tags_that_are_not_canonical(self):
+        """head 에는 stylesheet·icon 등 link 가 여럿 있다. rel 로 걸러야 한다.
+
+        rel 조건이 빠지면 첫 link 의 href 를 canonical 로 착각해, 사람인에서
+        엉뚱한 주소로 재요청하게 된다.
+        """
+        html = (
+            '<html><head>'
+            '<link rel="stylesheet" href="/style.css">'
+            '<link rel="canonical" href="https://www.saramin.co.kr/real">'
+            '</head></html>'
+        )
+
+        assert worker.extract_canonical_url(html) == "https://www.saramin.co.kr/real"
+
+    def test_should_return_none_when_canonical_tag_has_no_href(self):
+        """태그는 있는데 href 가 없는 경우 — 정규식은 둘을 한 번에 요구해서
+        생기지 않던 중간 상태다. 가드가 없으면 KeyError 로 job 이 DLQ 로 간다.
+        """
+        assert worker.extract_canonical_url('<link rel="canonical">') is None
+
+    def test_should_strip_surrounding_whitespace_in_canonical_href(self):
+        html = '<link rel="canonical" href="  https://www.saramin.co.kr/a  ">'
+
+        assert worker.extract_canonical_url(html) == "https://www.saramin.co.kr/a"
