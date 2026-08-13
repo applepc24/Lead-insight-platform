@@ -102,16 +102,24 @@ def ensure_checkpoint_table(project_id: str, dataset: str, table: str):
 
 
 def already_loaded_keys(project_id: str, dataset: str, checkpoint_table: str) -> set[str]:
+    """이미 적재한 s3_key 집합을 돌려준다.
+
+    예외를 삼키지 않는다. 조회에 실패했다는 것은 "적재된 게 없다"가 아니라
+    "무엇이 적재됐는지 모른다"는 뜻이다. 빈 집합을 돌려주면 호출부가 S3 전체를
+    새 파일로 판정해 히스토리 전량이 다시 들어간다 — 중복 방지 장치가 고장 났을 때
+    막는 대신 통과시키는 fail-open 이 된다.
+
+    적재가 한 주기 늦는 것보다 전량 중복이 훨씬 비싸므로 태스크를 실패시킨다.
+    DAG 에 retries=2 가 걸려 있어 일시적 오류는 재시도에서 회복되고,
+    계속 실패하면 사람이 알게 된다.
+    """
     client = bigquery.Client(project=project_id)
     query = f"""
     SELECT s3_key
     FROM `{project_id}.{dataset}.{checkpoint_table}`
     """
-    try:
-        rows = client.query(query).result()
-        return {r["s3_key"] for r in rows}
-    except Exception:
-        return set()
+    rows = client.query(query).result()
+    return {r["s3_key"] for r in rows}
 
 
 def append_rows_to_bq(project_id: str, dataset: str, table: str, rows: List[dict]):
