@@ -65,6 +65,7 @@ Kafka 기반 큐를 통해 수집 요청과 처리 단계를 분리했고, Worke
 - Python Worker
 - Playwright (JS 렌더링 사이트 수집)
 - Requests (SSR 사이트 수집 / 상세 페이지 fetch)
+- BeautifulSoup (공고 HTML 구조 추출)
 - boto3
 
 ### Data Storage
