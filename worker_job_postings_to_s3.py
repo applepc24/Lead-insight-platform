@@ -674,11 +674,20 @@ def extract_fields_by_domain(url: str, html: str) -> dict:
 
 
 def create_consumer() -> Consumer:
+    """자동 커밋을 반드시 끈다.
+
+    librdkafka 기본값은 enable.auto.commit=true 이고, 기본 설정에서는 poll() 이
+    메시지를 애플리케이션에 넘기는 순간 오프셋이 저장된 뒤 5초마다 백그라운드로
+    커밋된다. 처리 성공 여부를 보지 않으므로, 자동 커밋을 켠 채로는 단계별
+    수동 커밋이 무의미해진다 — 처리 도중 죽으면 오프셋만 앞서 나가 메시지가
+    조용히 사라진다 (at-least-once 로 설계했는데 at-most-once 로 동작).
+    """
     return Consumer(
         {
             "bootstrap.servers": KAFKA_BOOTSTRAP,
             "group.id": GROUP_ID,
             "auto.offset.reset": "earliest",
+            "enable.auto.commit": False,
         }
     )
 

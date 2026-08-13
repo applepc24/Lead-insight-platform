@@ -445,3 +445,50 @@ class TestDocumentShape:
         )
 
         assert len(result["description_text"]) == 4000
+
+class TestConsumerConfiguration:
+    """컨슈머 설정은 시나리오 테스트가 create_consumer 를 통째로 대체하기 때문에
+    한 번도 검증된 적이 없었다. 설정 자체를 보는 테스트가 따로 필요하다.
+    """
+
+    @staticmethod
+    def _capture_config(monkeypatch) -> dict:
+        captured = {}
+
+        class FakeKafkaConsumer:
+            def __init__(self, config):
+                captured.update(config)
+
+        monkeypatch.setattr(worker, "Consumer", FakeKafkaConsumer)
+        worker.create_consumer()
+        return captured
+
+    def test_consumer_must_disable_auto_commit(self, monkeypatch):
+        """자동 커밋이 켜져 있으면 단계별 수동 커밋 설계가 무력화된다.
+
+        librdkafka 는 enable.auto.commit 기본값이 true 이고, 기본 설정에서는
+        poll() 이 메시지를 애플리케이션에 넘기는 순간 오프셋이 저장된 뒤
+        auto.commit.interval.ms(기본 5초) 마다 백그라운드로 커밋된다.
+        처리 성공 여부를 보지 않으므로, fetch 가 느린 사이(타임아웃이 연결 3초 +
+        읽기 10초라 최대 13초) 워커가 죽으면 처리되지 않은 메시지의 오프셋이
+        이미 커밋돼 있다. at-least-once 로 설계한 파이프라인이 실제로는
+        at-most-once 로 동작해 메시지가 조용히 사라진다.
+
+        같은 저장소의 replay_dlq_to_original.py 와 consumer_dlq_to_bigquery.py 는
+        둘 다 명시적으로 끄고 있다. 워커만 빠져 있던 것은 판단이 아니라 누락이다.
+        """
+        config = self._capture_config(monkeypatch)
+
+        assert config.get("enable.auto.commit") is False
+
+    def test_consumer_must_keep_earliest_offset_reset(self, monkeypatch):
+        """오프셋 정보가 없을 때 처음부터 읽어야 수집분을 건너뛰지 않는다."""
+        config = self._capture_config(monkeypatch)
+
+        assert config["auto.offset.reset"] == "earliest"
+
+    def test_consumer_must_set_group_id_and_bootstrap(self, monkeypatch):
+        config = self._capture_config(monkeypatch)
+
+        assert config["group.id"] == worker.GROUP_ID
+        assert config["bootstrap.servers"] == worker.KAFKA_BOOTSTRAP
