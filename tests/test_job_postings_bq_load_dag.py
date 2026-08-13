@@ -1,8 +1,8 @@
 """s3_to_bq_job_postings_stg DAG 의 적재 로직 테스트.
 
 DAG 파일은 그대로 import 할 수 없다. 저장소 루트의 airflow/ 디렉토리가 실제 Airflow
-패키지를 가리고, google-cloud-bigquery 는 venv 에 설치돼 있지 않다. 그래서 두 의존성을
-sys.modules 에 가짜로 밀어 넣은 뒤 파일 경로로 직접 로드한다.
+패키지를 가리고, google-cloud-bigquery 는 venv 에 설치돼 있지 않다. 두 의존성의
+스텁은 tests/conftest.py 가 깔아두고, 여기서는 파일 경로로 직접 로드한다.
 
 DAG 파일을 손대지 않고 테스트를 붙이기 위한 선택이다. 로직을 별도 모듈로 분리하면
 스텁이 필요 없어지지만, 그러면 Airflow 배포 시 모듈이 함께 가도록 배포 설정을
@@ -10,8 +10,6 @@ DAG 파일을 손대지 않고 테스트를 붙이기 위한 선택이다. 로�
 """
 
 import importlib.util
-import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -20,61 +18,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DAG_PATH = PROJECT_ROOT / "airflow" / "dags" / "s3_to_bq_job_postings_stg.py"
 
 
-class _FakeDAG:
-    def __init__(self, *args, **kwargs):
-        self.kwargs = kwargs
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-
-class _FakePythonOperator:
-    def __init__(self, *args, **kwargs):
-        self.kwargs = kwargs
-
-
-def _install_import_stubs() -> None:
-    """DAG 파일이 import 하는 외부 패키지를 가짜로 채운다.
-
-    모듈 로드 시점에 필요한 것은 이름뿐이다 (bigquery.Client 등은 전부 함수 안에서
-    쓰이므로). 테스트는 각자 필요한 속성을 monkeypatch 로 덮어쓴다.
-    """
-    airflow = types.ModuleType("airflow")
-    airflow.DAG = _FakeDAG
-
-    operators = types.ModuleType("airflow.operators")
-    python_op = types.ModuleType("airflow.operators.python")
-    python_op.PythonOperator = _FakePythonOperator
-    operators.python = python_op
-    airflow.operators = operators
-
-    sys.modules["airflow"] = airflow
-    sys.modules["airflow.operators"] = operators
-    sys.modules["airflow.operators.python"] = python_op
-
-    bigquery = types.ModuleType("google.cloud.bigquery")
-    bigquery.Client = object
-    bigquery.SchemaField = lambda *a, **k: None
-    bigquery.DatasetReference = lambda *a, **k: None
-    bigquery.Table = lambda *a, **k: None
-    bigquery.TimePartitioning = lambda *a, **k: None
-    bigquery.TimePartitioningType = types.SimpleNamespace(DAY="DAY")
-
-    google = types.ModuleType("google")
-    cloud = types.ModuleType("google.cloud")
-    cloud.bigquery = bigquery
-    google.cloud = cloud
-
-    sys.modules["google"] = google
-    sys.modules["google.cloud"] = cloud
-    sys.modules["google.cloud.bigquery"] = bigquery
-
-
 def _load_dag_module():
-    _install_import_stubs()
+    """airflow / google.cloud.bigquery 스텁은 tests/conftest.py 가 미리 깔아둔다."""
     spec = importlib.util.spec_from_file_location("stg_dag_under_test", DAG_PATH)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
