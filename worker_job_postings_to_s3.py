@@ -89,6 +89,69 @@ def send_to_dlq(producer: Producer, job: dict, error: Exception, stage: str, err
     print(json.dumps(dlq_message, indent=2, ensure_ascii=False))
 
 
+class MalformedJobMessage(Exception):
+    """Kafka 메시지를 job 으로 해석할 수 없다.
+
+    재시도해도 결과가 같은 종류의 실패라서, 재시도 대상이 아니라 즉시 DLQ 행이다.
+    """
+
+REQUIRED_JOB_FIELDS = ("job_id", "source", "url", "collected_at")
+
+def parse_job_message(raw: bytes) -> dict:
+    """Kafka 메시지 바이트를 job dict 로 해석한다.
+
+    해석 단계의 모든 실패를 MalformedJobMessage 하나로 모은다. 호출부가 예외 종류를
+    일일이 알 필요 없이 "해석에 실패했다"는 한 가지 경우만 다루면 되게 하기 위해서다.
+    """
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise MalformedJobMessage(f"not valid utf-8: {e}") from e
+
+    try:
+        job = json.loads(decoded)
+    except json.JSONDecodeError as e:
+        raise MalformedJobMessage(f"not valid json: {e}") from e
+
+    if not isinstance(job, dict):
+        raise MalformedJobMessage(f"job must be a JSON object, got {type(job).__name__}")
+
+    missing = [field for field in REQUIRED_JOB_FIELDS if not job.get(field)]
+    if missing:
+        raise MalformedJobMessage(f"missing required fields: {', '.join(missing)}")
+
+    return job
+
+
+def send_malformed_to_dlq(producer: Producer, raw: bytes, error: Exception) -> None:
+    """job 으로 해석되지 않은 메시지를 원본과 함께 DLQ 로 보낸다.
+
+    job 을 빈 dict 로 싣는다. DLQ 소비자들(replay_dlq_to_original.py,
+    consumer_dlq_to_bigquery.py)이 payload.get("job", {}) 로 꺼낸 뒤 곧바로
+    job.get(...) 을 부르는데, null 을 실으면 키가 존재하므로 기본값이 적용되지 않고
+    None 이 반환돼 소비자 쪽이 AttributeError 로 죽는다 — 결함을 옮기는 셈이 된다.
+
+    key 가 None 인 것은 의도적이다. job_id 를 모르므로 파티션을 고를 근거가 없다.
+    """
+    dlq_message = {
+        "job": {},
+        "raw_message": raw.decode("utf-8", errors="replace")[:2000],
+        "error_type": "malformed_message",
+        "error_message": str(error),
+        "failed_stage": "parse",
+        "failed_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+    producer.produce(
+        DLQ_TOPIC,
+        key=None,
+        value=json.dumps(dlq_message, ensure_ascii=False).encode("utf-8"),
+    )
+    producer.flush()
+
+    print(f"[worker] malformed message sent to DLQ: {error}")
+
+
 def has_exceeded_retry_limit(job: dict) -> bool:
     current_retry = int(job.get("retry_count", 0))
     return current_retry >= MAX_RETRY_COUNT
@@ -791,8 +854,12 @@ def main():
                 print(f"[worker] consume error: {msg.error()}")
                 continue
 
-            raw_value = msg.value().decode("utf-8")
-            job = json.loads(raw_value)
+            try:
+                job = parse_job_message(msg.value())
+            except MalformedJobMessage as e:
+                send_malformed_to_dlq(producer, msg.value(), e)
+                consumer.commit(message=msg, asynchronous=False)
+                continue
 
             print("[worker] received job:")
             print(json.dumps(job, indent=2, ensure_ascii=False))
@@ -802,8 +869,14 @@ def main():
                 consumer.commit(message=msg, asynchronous=False)
                 continue
 
+            try:
+                s3_paths = build_s3_paths(job)
+            except Exception as e:
+                print(f"[worker] failed to build s3 paths: {e}")
+                send_to_dlq(producer, job, e, "parse", error_type=type(e).__name__)
+                consumer.commit(message=msg, asynchronous=False)
+                continue
 
-            s3_paths = build_s3_paths(job)
             print("[worker] computed S3 paths:")
             print(json.dumps(s3_paths, indent=2, ensure_ascii=False))
 

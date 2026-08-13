@@ -32,8 +32,12 @@ def make_job(
 
 
 class FakeMsg:
-    def __init__(self, value: dict):
-        self._value = json.dumps(value, ensure_ascii=False).encode("utf-8")
+    def __init__(self, value):
+        # bytes 를 그대로 실을 수 있어야 오염 메시지를 재현할 수 있다.
+        if isinstance(value, (bytes, bytearray)):
+            self._value = bytes(value)
+        else:
+            self._value = json.dumps(value, ensure_ascii=False).encode("utf-8")
 
     def value(self):
         return self._value
@@ -355,3 +359,156 @@ class TestWorkerScenarios:
         assert payload["failed_stage"] == "raw_upload"
         assert payload["error_type"] == "RuntimeError"
         assert payload["job"]["retry_count"] == 1
+
+def stub_happy_path(monkeypatch, uploaded):
+    """정상 처리 경로를 전부 스텁으로 대체한다 (오염 메시지 테스트의 대조군용)."""
+    monkeypatch.setattr(worker, "s3_object_exists", lambda s3, bucket, key: False)
+    monkeypatch.setattr(worker, "fetch_html", lambda session, url: "<html>ok</html>")
+    monkeypatch.setattr(worker, "refetch_canonical_url", lambda session, url, html: html)
+    monkeypatch.setattr(
+        worker, "upload_raw_html_to_s3",
+        lambda s3, bucket, key, html: uploaded.append(key),
+    )
+    monkeypatch.setattr(
+        worker, "upload_json_to_s3",
+        lambda s3, bucket, key, data: uploaded.append(key),
+    )
+    monkeypatch.setattr(
+        worker, "build_processed_document", lambda job, s3_paths, html: {"kind": "processed"}
+    )
+    monkeypatch.setattr(
+        worker, "build_curated_document", lambda job, s3_paths, html: {"kind": "curated"}
+    )
+
+
+POISON_MESSAGES = [
+    pytest.param(b"{not valid json", id="깨진_JSON"),
+    pytest.param(b"\xff\xfe invalid utf-8", id="UTF8_아님"),
+    pytest.param(json.dumps([1, 2, 3]).encode("utf-8"), id="dict_아님"),
+    pytest.param(json.dumps("문자열").encode("utf-8"), id="문자열_JSON"),
+    pytest.param(json.dumps({"job_id": "only-id"}).encode("utf-8"), id="필수필드_누락"),
+    pytest.param(b"", id="빈_메시지"),
+    # 키는 있지만 값이 비어 있는 경우. `field not in job` 으로 검사하면 통과해버려서
+    # fetch_html("") 까지 흘러간 뒤에야 실패한다 — 실패 지점만 뒤로 밀릴 뿐이다.
+    pytest.param(
+        json.dumps({**make_job(), "url": ""}).encode("utf-8"), id="url_이_빈문자열"
+    ),
+    pytest.param(
+        json.dumps({**make_job(), "url": None}).encode("utf-8"), id="url_이_null"
+    ),
+    pytest.param(
+        json.dumps({**make_job(), "collected_at": ""}).encode("utf-8"),
+        id="collected_at_이_빈문자열",
+    ),
+]
+
+
+class TestPoisonMessageHandling:
+    """오염된 메시지 한 건이 파이프라인 전체를 멈추면 안 된다.
+
+    해석 단계(decode/json/필수 필드/날짜 형식)가 try 밖에 있으면 예외가 main 루프를
+    빠져나가 워커가 죽는다. 이때 오프셋은 커밋되지 않았으므로 재시작하면 같은 메시지를
+    다시 읽고 또 죽는다 — 무한 크래시 루프이고, 뒤에 쌓인 정상 공고는 영원히 처리되지
+    않는다. fetch·업로드 실패에는 이미 DLQ 경로가 있는데 해석 단계에만 없었다.
+    """
+
+    @pytest.mark.parametrize("raw", POISON_MESSAGES)
+    def test_poison_message_should_not_kill_worker(self, monkeypatch, scenario_env, raw):
+        env = scenario_env(jobs=[raw])
+        stub_happy_path(monkeypatch, [])
+
+        # KeyboardInterrupt 는 FakeConsumer 가 메시지를 다 소진했다는 신호다.
+        # 다른 예외로 빠져나오면 워커가 죽은 것이다.
+        with pytest.raises(KeyboardInterrupt):
+            worker.main()
+
+    @pytest.mark.parametrize("raw", POISON_MESSAGES)
+    def test_poison_message_should_be_committed(self, monkeypatch, scenario_env, raw):
+        """커밋하지 않으면 재시작 때 같은 메시지를 다시 읽어 영원히 막힌다."""
+        env = scenario_env(jobs=[raw])
+        stub_happy_path(monkeypatch, [])
+
+        with pytest.raises(KeyboardInterrupt):
+            worker.main()
+
+        assert len(env["consumer"].committed) == 1
+
+    @pytest.mark.parametrize("raw", POISON_MESSAGES)
+    def test_poison_message_should_go_to_dlq(self, monkeypatch, scenario_env, raw):
+        """조용히 버리면 안 된다 — 무엇이 왜 들어왔는지 남겨야 원인을 찾는다."""
+        env = scenario_env(jobs=[raw])
+        stub_happy_path(monkeypatch, [])
+
+        with pytest.raises(KeyboardInterrupt):
+            worker.main()
+
+        produced = env["producer"].produced
+        assert len(produced) == 1
+        assert produced[0]["topic"] == "job_postings.dlq"
+
+        payload = json.loads(produced[0]["value"].decode("utf-8"))
+        assert payload["failed_stage"] == "parse"
+        assert payload["error_message"]
+
+    @pytest.mark.parametrize("raw", POISON_MESSAGES)
+    def test_poison_message_should_not_block_following_jobs(
+        self, monkeypatch, scenario_env, raw
+    ):
+        """이 테스트가 이 결함의 실제 피해를 재현한다.
+
+        오염 메시지 뒤에 줄 서 있던 정상 공고가 처리되는지를 본다.
+        """
+        env = scenario_env(jobs=[raw, make_job(job_id="job-after-poison")])
+        uploaded = []
+        stub_happy_path(monkeypatch, uploaded)
+
+        with pytest.raises(KeyboardInterrupt):
+            worker.main()
+
+        assert any("job-after-poison" in key for key in uploaded), (
+            "오염 메시지 뒤의 정상 공고가 처리되지 않았다 — 파이프라인이 막힌 것이다"
+        )
+        assert len(env["consumer"].committed) == 2
+
+    def test_invalid_collected_at_should_go_to_dlq_instead_of_crashing(
+        self, monkeypatch, scenario_env
+    ):
+        """build_s3_paths 의 fromisoformat 이 ValueError 를 던지는 경로.
+
+        JSON 으로는 멀쩡하고 필수 필드도 다 있어서 해석 단계는 통과한다.
+        S3 경로를 만드는 시점에야 깨지므로 별도 방어가 필요하다.
+        """
+        env = scenario_env(jobs=[make_job(collected_at="어제")])
+        stub_happy_path(monkeypatch, [])
+
+        with pytest.raises(KeyboardInterrupt):
+            worker.main()
+
+        assert len(env["consumer"].committed) == 1
+        assert len(env["producer"].produced) == 1
+
+        payload = json.loads(env["producer"].produced[0]["value"].decode("utf-8"))
+        assert payload["failed_stage"] == "parse"
+
+    @pytest.mark.parametrize("raw", POISON_MESSAGES)
+    def test_dlq_record_must_stay_readable_by_dlq_consumers(
+        self, monkeypatch, scenario_env, raw
+    ):
+        """DLQ 레코드의 job 필드는 반드시 dict 여야 한다.
+
+        replay_dlq_to_original.py 와 consumer_dlq_to_bigquery.py 는 둘 다
+        `payload.get("job", {})` 로 꺼낸 뒤 곧바로 `job.get(...)` 을 부른다.
+        job 을 null 로 실어 보내면 기본값이 적용되지 않아 (키가 있으므로) None 이
+        반환되고, DLQ 소비자 쪽이 AttributeError 로 죽는다 — 결함을 옮기는 셈이다.
+        """
+        env = scenario_env(jobs=[raw])
+        stub_happy_path(monkeypatch, [])
+
+        with pytest.raises(KeyboardInterrupt):
+            worker.main()
+
+        payload = json.loads(env["producer"].produced[0]["value"].decode("utf-8"))
+
+        job = payload.get("job", {})
+        assert isinstance(job, dict), "job 이 dict 가 아니면 DLQ 소비자가 죽는다"
+        assert job.get("retry_count", 0) == 0
